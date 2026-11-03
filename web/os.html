@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeRobot 101 OS</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+<link rel="stylesheet" href="./style.css">
+<!-- import map：three 與 examples/jsm 一律走本地 vendor（零 CDN、零建置） -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/examples/jsm/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<!-- ═══════════ 開機畫面 ═══════════ -->
+<div id="bootOverlay">
+  <div class="boot-inner">
+    <!-- 品牌標誌：自己畫的可愛機器手臂（圓潤、友善） -->
+    <svg class="brandmark" viewBox="0 0 140 140" fill="none" aria-hidden="true">
+      <circle cx="26" cy="36" r="4" fill="#ffb37a"/>
+      <circle cx="16" cy="52" r="3" fill="#e3dfd5"/>
+      <circle cx="120" cy="98" r="3.5" fill="#e3dfd5"/>
+      <rect x="34" y="112" width="72" height="16" rx="8" fill="#22221e"/>
+      <path d="M70 112 L70 74" stroke="#ff7f2a" stroke-width="16" stroke-linecap="round"/>
+      <circle cx="70" cy="74" r="9" fill="#22221e"/>
+      <circle cx="70" cy="74" r="3.4" fill="#f6f4ef"/>
+      <path d="M70 74 L98 48" stroke="#ff7f2a" stroke-width="13" stroke-linecap="round"/>
+      <circle cx="102" cy="44" r="16" fill="#22221e"/>
+      <circle cx="97" cy="41" r="2.7" fill="#fff"/>
+      <circle cx="107" cy="41" r="2.7" fill="#fff"/>
+      <path d="M97.5 48 Q102 52 106.5 48" stroke="#fff" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+      <path d="M112 32 L123 21" stroke="#ffb37a" stroke-width="7" stroke-linecap="round"/>
+      <path d="M116 51 L130 47" stroke="#ffb37a" stroke-width="7" stroke-linecap="round"/>
+    </svg>
+    <h1>LeRobot 101 OS</h1>
+    <p class="boot-sub">可愛又優雅的 SO-ARM101 開箱系統 <span class="en">A cute &amp; elegant onboarding OS</span></p>
+    <button id="btnBoot" class="big primary">開始 <span class="en">Start</span></button>
+    <p id="bootTyper" aria-live="polite"></p>
+  </div>
+</div>
+
+<!-- ═══════════ 頁首 ═══════════ -->
+<header id="topbar">
+  <div class="brand">🤖 <b>LeRobot 101 OS</b></div>
+  <div class="badges">
+    <span id="modeBadge" class="badge">—</span>
+    <span id="phaseBadge" class="badge">—</span>
+    <span id="wsBadge" class="badge">—</span>
+    <span id="serverBadge" class="badge mono">—</span>
+  </div>
+</header>
+
+<!-- ═══════════ 三欄佈局 ═══════════ -->
+<main class="layout">
+
+  <!-- 左：步驟導覽 ①–⑤ -->
+  <nav id="stepNav" aria-label="步驟">
+    <button class="step" data-panel="connect"><span class="num">①</span><span class="t">連線<span class="en">Connect</span></span><span class="check">✓</span></button>
+    <button class="step" data-panel="calib"><span class="num">②</span><span class="t">校準<span class="en">Calibrate</span></span><span class="check">✓</span></button>
+    <button class="step" data-panel="teleop"><span class="num">③</span><span class="t">遙操作<span class="en">Teleop</span></span><span class="check">✓</span></button>
+    <button class="step" data-panel="record"><span class="num">④</span><span class="t">錄製<span class="en">Record</span></span><span class="check">✓</span></button>
+    <button class="step" data-panel="replay"><span class="num">⑤</span><span class="t">回放<span class="en">Replay</span></span><span class="check">✓</span></button>
+    <button class="step" data-panel="smart"><span class="num">⑥</span><span class="t">智慧<span class="en">Smart</span></span><span class="check">✓</span></button>
+  </nav>
+
+  <!-- 中：面板 -->
+  <section id="panels">
+
+    <!-- ① 連線 -->
+    <section class="panel" id="panel-connect">
+      <div class="next-banner" id="banner-connect" hidden></div>
+      <h2>① 連線 <span class="en">Connect</span></h2>
+      <div class="arm-cards">
+        <div class="card arm-card" id="armcard-leader"></div>
+        <div class="card arm-card" id="armcard-follower"></div>
+      </div>
+      <div class="card cam-card">
+        <h3>🎥 夾爪相機 <span class="en">Gripper camera</span> <span class="cam-name" id="camName"></span>
+          <select id="camSelect" class="cam-select" hidden></select></h3>
+        <div class="cam-wrap" id="camConnectWrap">
+          <img id="camConnect" alt="夾爪相機畫面">
+          <div class="cam-dead-msg">📷 相機未連線（不影響流程）</div>
+          <div class="cam-switch-msg"><span></span>正在切換相機，請稍候…</div>
+          <div class="cam-black-msg" id="camBlackMsg" hidden>🕶 畫面全黑——檢查一下鏡頭蓋是不是還蓋著？</div>
+        </div>
+      </div>
+      <div class="row">
+        <button class="big" data-action="scan" id="btnScan">🔄 重新掃描 <span class="en">Rescan</span></button>
+      </div>
+    </section>
+
+    <!-- ② 校準 -->
+    <section class="panel" id="panel-calib" hidden>
+      <div class="next-banner" id="banner-calib" hidden></div>
+      <h2>② 校準 <span class="en">Calibrate</span></h2>
+      <div id="calibBody"></div>
+    </section>
+
+    <!-- ③ 遙操作 -->
+    <section class="panel" id="panel-teleop" hidden>
+      <div class="next-banner" id="banner-teleop" hidden></div>
+      <h2>③ 遙操作 <span class="en">Teleop</span></h2>
+      <div class="hint-bar" id="hint-teleop" hidden></div>
+      <div class="viewer-big" id="teleopViewerSlot">
+        <div class="cam-float" id="camTeleopWrap">
+          <img id="camTeleop" alt="夾爪相機畫面">
+          <div class="cam-dead-msg">📷 相機未連線</div>
+          <div class="cam-switch-msg"><span></span>正在切換相機…</div>
+        </div>
+      </div>
+      <div class="row teleop-controls">
+        <button class="big primary" data-action="teleop-start" id="btnTeleopStart">▶ 開始遙操作 <span class="en">Start</span></button>
+        <button class="big danger" data-action="teleop-stop" id="btnTeleopStop">⏹ 停止 <span class="en">Stop</span></button>
+        <div class="stat" id="hzStat" hidden>迴圈頻率 <b>—</b> Hz</div>
+      </div>
+      <p class="tip">💡 拿起 Leader（小臂），Follower 會即時跟著動。</p>
+    </section>
+
+    <!-- ④ 錄製 -->
+    <section class="panel" id="panel-record" hidden>
+      <div class="next-banner" id="banner-record" hidden></div>
+      <h2>④ 錄製 <span class="en">Record</span></h2>
+      <div class="hint-bar" id="hint-record" hidden></div>
+      <div class="card" id="recordForm">
+        <label>資料集名稱 <span class="en">Dataset name</span>
+          <input id="recName" type="text" placeholder="例如 pick_jar_v1" autocomplete="off">
+        </label>
+        <label>任務描述 <span class="en">Task description</span>
+          <input id="recTask" type="text" placeholder="例如 把小罐子放到盒子裡" autocomplete="off">
+        </label>
+        <label class="fps-label">FPS
+          <input id="recFps" type="number" value="30" min="5" max="60">
+        </label>
+        <button class="big primary" data-action="record-start" id="btnRecordStart">⏺ 開始錄製 <span class="en">Start recording</span></button>
+      </div>
+      <div id="recordLive" hidden></div>
+    </section>
+
+    <!-- ⑤ 回放 -->
+    <section class="panel" id="panel-replay" hidden>
+      <h2>⑤ 回放 <span class="en">Replay</span></h2>
+      <div class="hint-bar" id="hint-replay" hidden></div>
+      <div id="replayBody"></div>
+    </section>
+
+    <!-- ⑥ 智慧：拿錄好的資料集訓練 ACT，訓練完點一下就自己動 -->
+    <section class="panel" id="panel-smart" hidden>
+      <h2>⑥ 智慧 <span class="en">Smart</span></h2>
+      <div class="hint-bar" id="hint-smart" hidden></div>
+      <div id="smartBody"></div>
+    </section>
+
+  </section>
+
+  <!-- 右：常駐 aside（3D + 日誌） -->
+  <aside id="sidebar">
+    <div class="card viewer-card">
+      <h3>🦾 3D 預覽 <span class="en">Preview</span></h3>
+      <div class="viewer-slot" id="asideViewerSlot"></div>
+      <p class="viewer-note" id="asideViewerNote" hidden>3D 檢視已移到左邊面板 →</p>
+    </div>
+    <div class="card log-card">
+      <h3>📜 操作日誌 <span class="en">Log</span></h3>
+      <pre id="logBox" class="mono"></pre>
+    </div>
+  </aside>
+</main>
+
+<!-- 模擬人手滑桿（mock 模式限定） -->
+<div id="simhandPanel" hidden>
+  <button id="simhandToggle">🧪 模擬人手 <span class="en">Sim hand</span></button>
+  <div id="simhandBody" hidden>
+    <div class="simhand-tabs">
+      <button class="simtab active" data-arm="follower">Follower</button>
+      <button class="simtab" data-arm="leader">Leader</button>
+    </div>
+    <div id="simhandSliders"></div>
+    <button class="simhand-center" data-action="mock-center">🎯 一鍵置中</button>
+  </div>
+</div>
+
+<!-- 字幕膠囊 / toast / 彩帶 / 確認框 -->
+<div id="subtitlePill" aria-live="polite"></div>
+<div id="toastWrap"></div>
+<canvas id="confettiCanvas"></canvas>
+<div id="confirmOverlay" hidden>
+  <div class="confirm-box card">
+    <p id="confirmText"></p>
+    <div class="row">
+      <button class="big" id="confirmNo">取消 <span class="en">Cancel</span></button>
+      <button class="big danger" id="confirmYes">確定 <span class="en">Confirm</span></button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

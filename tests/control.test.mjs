@@ -1,0 +1,13 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {Controller,REACHY_LIMITS,ARM_LIMITS,synthetic,reachyMap,armMap,faceYaw}from '../web/control-core.js';
+test('human right maps to robot left, not screen right',()=>{const s=synthetic(Math.PI/2);s.pose[16].y=0;s.pose[15].y=.8;const v=reachyMap(s);assert.equal(v.left,70);assert.equal(v.right,0);assert.equal(reachyMap({...s,mirror:false}).right,70);});
+test('head calibration and reversal',()=>{let s=synthetic(0);s.yaw=50;assert.equal(reachyMap(s).yaw,35);assert.equal(reachyMap({...s,center:40,invert:true}).yaw,-10);});
+test('missing/low-confidence landmarks produce no target',()=>{assert.equal(reachyMap({yaw:null,pose:[]}),null);const s=synthetic(0);s.pose[16].visibility=.1;assert.equal(armMap(s.pose,s.hand),null);});
+test('face matrix yaw and malformed input',()=>{assert.equal(faceYaw(null),null);const a=Math.PI/6;assert.ok(Math.abs(faceYaw([Math.cos(a),0,-Math.sin(a),0,0,1,0,0,Math.sin(a),0,Math.cos(a),0,0,0,0,1])-30)<1e-6);});
+test('all synthetic arm targets finite and bounded',()=>{for(let t=0;t<20;t+=.05){const s=synthetic(t),a=armMap(s.pose,s.hand);for(const [k,[lo,hi]]of Object.entries(ARM_LIMITS))assert.ok(Number.isFinite(a[k])&&a[k]>=lo&&a[k]<=hi,k);}});
+test('reject NaN/Infinity, limit angles and speed',()=>{const c=new Controller(REACHY_LIMITS);c.resume();assert.equal(c.submit({yaw:NaN,left:0,right:0},0),false);c.tick(0);c.submit({yaw:500,left:900,right:-900},1);let r=c.tick(101);assert.ok(r.value.yaw<=12);assert.ok(r.value.left<=12);assert.equal(r.value.right,0);});
+test('delay is measurable; newer packet wins after reordering',()=>{const c=new Controller(REACHY_LIMITS);c.resume();c.submit({yaw:20,left:0,right:0},0,{delay:400,sequence:1});c.submit({yaw:-20,left:0,right:0},100,{delay:0,sequence:2});c.tick(100);c.tick(401);assert.equal(c.target.yaw,-20);});
+test('stale tracking freezes current pose',()=>{const c=new Controller(REACHY_LIMITS);c.resume();c.tick(0);c.submit({yaw:20,left:40,right:0},1);c.tick(100);const before=c.value.yaw;assert.equal(c.tick(800).state,'HOLD');assert.equal(c.value.yaw,before);});
+test('stop latches, clears delayed commands, resume does not replay old target',()=>{const c=new Controller(REACHY_LIMITS);c.resume();c.submit({yaw:30,left:60,right:0},0,{delay:400});c.stop();assert.equal(c.tick(500).state,'STOP');assert.equal(c.value.yaw,0);c.resume();assert.equal(c.tick(600).state,'HOLD');assert.equal(c.value.yaw,0);});
+
+test('head continues without hands; missing channel holds its previous angle',()=>{const v=reachyMap({yaw:10,pose:null,previous:{yaw:0,left:35,right:12}});assert.deepEqual(v,{yaw:10,left:35,right:12});});

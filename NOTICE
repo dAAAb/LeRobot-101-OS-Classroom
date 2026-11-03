@@ -1,0 +1,9 @@
+NTU Virtual Human & Telepresence — classroom projects, 2026.
+New classroom implementation: Copyright 2026 dAAAb. Apache License 2.0.
+Third-party components retain their original copyright and license.
+Three.js (r185-derived vendor files): MIT, mrdoob and contributors.
+MediaPipe Tasks Vision 1.2.0 and official model downloads: Google, Apache-2.0; downloaded separately, not committed.
+URDFLoader (arm project only): MIT, Garrett Johnson and contributors.
+SO-101 CAD/URDF/STL (arm project only): The Robot Studio and contributors, Apache-2.0; derived through dAAAb/LeRobot-101-OS.
+Reachy Mini SDK, assets and MuJoCo are installed separately in the optional simulator environment.
+See LICENSES/ for the bundled third-party notices and README for source links.

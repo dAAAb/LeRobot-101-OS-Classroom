@@ -1,0 +1,62 @@
+[
+  {
+    "path": "web/vendor/mediapipe/vision_bundle.mjs",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs",
+    "bytes": 156344,
+    "sha256": "870da5cfc43bfcf2a8b0f14e8152dae8c7e701722e1191b0e592b94b81b4127a"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_internal.wasm",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_internal.wasm",
+    "bytes": 14466654,
+    "sha256": "bcc13df22d3d69ec8cbe8e280989356d844ae00f4523eb82072d2484f44134dc"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_internal.js",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_internal.js",
+    "bytes": 334128,
+    "sha256": "85c1a342be70427987f900969a5f26e17557351111364e6585e97fb03e93e108"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_module_internal.js",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_module_internal.js",
+    "bytes": 334166,
+    "sha256": "60384c9014750321c0fc1d489b3329e5eaed0fcf3c328d404ecb1a6c75e89d17"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_module_internal.wasm",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_module_internal.wasm",
+    "bytes": 14466676,
+    "sha256": "2e326b9d9584ac22e230c263f47e6fe694a7df1ce22a8546c72df0e5c0fc1066"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_nosimd_internal.wasm",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_nosimd_internal.wasm",
+    "bytes": 12915401,
+    "sha256": "ed5e5e5812490bd90d6a440290845ff9e4c516f696847a28a0c0e0573470d469"
+  },
+  {
+    "path": "web/vendor/mediapipe/wasm/vision_wasm_nosimd_internal.js",
+    "url": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm/vision_wasm_nosimd_internal.js",
+    "bytes": 333931,
+    "sha256": "e9b2b799e0f1078f5538b300a57835b823742c37e2646308a03f0f25b39fdcdc"
+  },
+  {
+    "path": "web/models/face_landmarker.task",
+    "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    "bytes": 3758596,
+    "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
+  },
+  {
+    "path": "web/models/hand_landmarker.task",
+    "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+    "bytes": 7819105,
+    "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
+  },
+  {
+    "path": "web/models/pose_landmarker_lite.task",
+    "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    "bytes": 5777746,
+    "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a"
+  }
+]
