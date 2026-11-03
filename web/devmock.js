@@ -3,7 +3,7 @@
 // 讓整個 UI 只靠 `python3 -m http.server` 就能完整展示與測試。
 // 劇本：boot → scan（2 秒後雙臂出現）→ 自動走完 follower 校準
 //       （置中每 1.2s 一關節 → 倒數確認 → 極限逐關節掃出 extreme_hit → calib_saved 彩帶）
-//       → idle → 假遙操作（正弦關節）。
+//       → idle → 自動示範；滑桿接手後使用真實輸入。錄製／回放保存本次記憶體中的關節。
 // 核心是純資料引擎（advance(dt) 推進），瀏覽器用 setInterval 驅動；
 // Node 測試可 import createMockSim 後手動 advance 驗證狀態轉換與 tick 形狀。
 
@@ -50,6 +50,9 @@ export function createMockSim(opts = {}) {
   // 校準 runtime（不進 snapshot）
   const rt = { hold: {}, extremeHold: 0, lastRaw: {}, guidedKey: null, prevAuto: null, noise: { leader: false, follower: false } };
 
+  // Session-only motion samples: not a LeRobotDataset or a simulated camera recording.
+  const recorded = new Map();
+  let episodeFrames = [], savedFrames = [];
   let timers = [];  // {at, fn}
   let tweens = [];  // {arm, joint, from, to, t0, dur}
   let tickAcc = 0;
@@ -364,7 +367,7 @@ export function createMockSim(opts = {}) {
     setPhase('teleop');
     S.teleop.running = true;
     S.teleop.t0 = S.t;
-    log('遙操作開始（60Hz 迴圈）');
+    log('遙操作開始（模擬關節迴圈）');
     speak('遙操作開始！動動 Leader，Follower 會跟著你。');
     return { ok: true, data: { ok: true } };
   }
@@ -388,29 +391,45 @@ export function createMockSim(opts = {}) {
 
   function motionEngine(dt) {
     const TELEOP_AMP = { shoulder_pan: 700, shoulder_lift: 480, elbow_flex: 580, wrist_flex: 430, wrist_roll: 880, gripper: 320 };
-    const RECORD_AMP = { shoulder_pan: 420, shoulder_lift: 320, elbow_flex: 380, wrist_flex: 260, wrist_roll: 500, gripper: 280 };
-    if (S.phase === 'teleop') {
-      const t = S.t - (S.teleop.t0 || 0);
-      S.raw.leader = sinPose(t, TELEOP_AMP);
-      S.raw.follower = sinPose(t - 120, TELEOP_AMP); // follower 慢 120ms
-      S.teleop.hz = r1(59.4 + 1.1 * Math.sin(S.t / 900));
-    } else if (S.phase === 'recording' && S.record) {
-      S.record.elapsed += dt / 1000; // 原始累積，snapshot 時才取整
-      S.record.frames = Math.round(S.record.elapsed * (S.record.fps || 30));
-      const t = S.t;
-      S.raw.leader = sinPose(t, RECORD_AMP, 1.4);
-      S.raw.follower = sinPose(t - 120, RECORD_AMP, 1.4);
+    if (S.phase === 'teleop' || (S.phase === 'recording' && S.record)) {
+      if (S.autoHand) S.raw.leader = sinPose(S.t - (S.teleop.t0 || 0), TELEOP_AMP);
+      // A visible 120 ms response time; never overwrite a user's leader command.
+      const before = { ...S.raw.follower };
+      const alpha = 1 - Math.exp(-dt / 120);
+      for (const j of JOINTS) S.raw.follower[j] += alpha * (S.raw.leader[j] - S.raw.follower[j]);
+      if (S.phase === 'teleop') S.teleop.hz = r1(1000 / Math.max(1, dt));
+      else {
+        S.record.elapsed += dt / 1000;
+        const end = S.record.elapsed * 1000;
+        const step = 1000 / S.record.fps;
+        while (episodeFrames.length * step <= end) {
+          const t = episodeFrames.length * step;
+          const a = Math.max(0, Math.min(1, (t - (end - dt)) / Math.max(1, dt)));
+          const joints = {};
+          for (const j of JOINTS) joints[j] = before[j] + a * (S.raw.follower[j] - before[j]);
+          episodeFrames.push({ t, joints });
+        }
+        S.record.frames = episodeFrames.length;
+        // Keep this browser-only teaching recorder bounded to two minutes per episode.
+        if (S.record.elapsed >= 120) { stopEpisode(true); finishRecord(); }
+      }
     } else if (S.phase === 'replaying' && S.replay) {
-      const durMs = 6500;
-      S.replay.progress = Math.min(1, (S.t - S.replay._t0) / durMs);
-      S.raw.follower = sinPose(S.t - S.replay._t0, RECORD_AMP, 1.6);
-      if (S.replay.progress >= 1) {
-        setPhase('idle');
-        S.replay = null;
-        emit('success');
-        speak('回放完成！');
-        // 手臂緩停回中
-        for (const j of JOINTS) tween('follower', j, CENTER, 800);
+      const samples = recorded.get(S.replay.repo_id)[S.replay.episode];
+      const elapsed = S.t - S.replay._t0;
+      const duration = samples[samples.length - 1].t;
+      if (elapsed < 500) {
+        const a = elapsed / 500;
+        for (const j of JOINTS) S.raw.follower[j] = S.replay._from[j] + a * (samples[0].joints[j] - S.replay._from[j]);
+      } else {
+        const t = elapsed - 500;
+        let i = S.replay._index;
+        while (i + 1 < samples.length && samples[i + 1].t <= t) i++;
+        S.replay._index = i;
+        const lo = samples[i], hi = samples[Math.min(i + 1, samples.length - 1)];
+        const a = hi.t === lo.t ? 0 : Math.max(0, Math.min(1, (t - lo.t) / (hi.t - lo.t)));
+        for (const j of JOINTS) S.raw.follower[j] = lo.joints[j] + a * (hi.joints[j] - lo.joints[j]);
+        S.replay.progress = Math.min(1, t / Math.max(1, duration));
+        if (t >= duration) { setPhase('idle'); S.replay = null; emit('success'); speak('回放完成！'); }
       }
     }
   }
@@ -422,11 +441,13 @@ export function createMockSim(opts = {}) {
     }
     const name = String((body && body.name) || '').trim();
     if (!name) return { ok: false, status: 400, error: '請先取一個資料集名稱' };
+    episodeFrames = [{ t: 0, joints: { ...S.raw.follower } }];
+    savedFrames = [];
     setPhase('recording');
     S.record = {
       repo_id: `neo/${name.replace(/\s+/g, '_')}`,
       task: (body && body.task) || '',
-      fps: (body && body.fps) || 30,
+      fps: Math.max(1, Math.min(60, Number(body && body.fps) || 30)),
       episode_index: 0, saved_episodes: 0, frames: 0, elapsed: 0,
     };
     log(`開始錄製 ${S.record.repo_id}（fps ${S.record.fps}）`);
@@ -435,7 +456,9 @@ export function createMockSim(opts = {}) {
   }
   function stopEpisode(save) {
     if (S.phase !== 'recording' || !S.record) return { ok: false, status: 409, error: '沒有進行中的錄製' };
+    if (save && episodeFrames.length < 2) return { ok: false, status: 400, error: '請先錄製一小段動作' };
     if (save) {
+      savedFrames.push(episodeFrames);
       S.record.saved_episodes += 1;
       S.record.episode_index += 1;
       emit('success');
@@ -445,12 +468,16 @@ export function createMockSim(opts = {}) {
       log('🗑 episode 已棄置');
       speak('好，這集不算，我們再來一次。');
     }
+    episodeFrames = [{ t: 0, joints: { ...S.raw.follower } }];
     S.record.frames = 0;
     S.record.elapsed = 0;
     return { ok: true, data: { ok: true } };
   }
   function finishRecord() {
     if (S.phase !== 'recording' || !S.record) return { ok: false, status: 409, error: '沒有進行中的錄製' };
+    if (!savedFrames.length) return { ok: false, status: 400, error: '請先按「存這集」，再完成收檔' };
+    recorded.set(S.record.repo_id, savedFrames);
+    S.datasets = S.datasets.filter(d => d.repo_id !== S.record.repo_id);
     S.datasets.unshift({
       repo_id: S.record.repo_id,
       episodes: S.record.saved_episodes,
@@ -473,7 +500,7 @@ export function createMockSim(opts = {}) {
     const ep = Number((body && body.episode) || 0);
     if (!(ep >= 0 && ep < ds.episodes)) return { ok: false, status: 400, error: `episode ${ep} 不存在（共 ${ds.episodes} 集）` };
     setPhase('replaying');
-    S.replay = { repo_id: repo, episode: ep, progress: 0, _t0: S.t };
+    S.replay = { repo_id: repo, episode: ep, progress: 0, _t0: S.t, _index: 0, _from: { ...S.raw.follower } };
     log(`▶ 回放 ${repo} #${ep}（先 ramp 到第一格）`);
     speak('開始回放，請注意手臂會動喔！');
     return { ok: true, data: { ok: true } };
@@ -482,8 +509,7 @@ export function createMockSim(opts = {}) {
     if (S.phase !== 'replaying') return { ok: false, status: 409, error: '沒有進行中的回放' };
     S.replay = null;
     setPhase('idle');
-    log('回放停止（緩停）');
-    for (const j of JOINTS) tween('follower', j, CENTER, 800);
+    log('回放停止（保持目前姿勢）');
     return { ok: true, data: { ok: true } };
   }
 
