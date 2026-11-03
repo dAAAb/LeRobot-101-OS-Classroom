@@ -1,13 +1,12 @@
-# Security and publication notes
+# Security and privacy
 
-- Bind to 127.0.0.1 only; no tunnel, remote robot discovery, telemetry or cloud inference.
-- Serve only web/; reject hidden paths, traversal, symlinks escaping that root and unexpected Host headers.
-- Optional simulation POST requires matching Origin, JSON, bounded finite angles and a small payload.
-- No physical robot bridge: opening the demo cannot command a real motor.
-- Webcam frames stay in browser memory. No recording/upload endpoint is implemented.
-- Model downloads are HTTPS, fixed version, SHA-256 checked. Do not disable certificate checks.
-- The example is a teaching service, not hardened multi-user infrastructure.
+- Default classroom server binds loopback only and serves the web root only.
+- Camera frames stay in the browser. No microphone, telemetry, cloud inference or API keys.
+- Pinned assets are fetched over verified HTTPS and checked against SHA-256.
+- No arbitrary command execution, file upload endpoint, serial-port scanning or automatic device discovery.
+- Robot control is optional and explicitly armed: Reachy through the local official daemon; SO-101 through a user-selected Web Serial port. Host/origin guards protect local HTTP writes. Serial writes are restricted to runtime position/speed and torque; no EEPROM writes.
+- These are classroom prototypes, not certified safety controllers. Software stop cannot replace hardware emergency stop. Validate physical axes and limits with an unloaded, secured robot before live use.
+- Do not publish camera recordings, calibration JSON, device identifiers, personal paths, credentials or private Git history.
+- `scripts/audit_public.py` scans tracked content and committed blobs without printing matched secret values. This is a pattern audit, not a complete security proof.
 
-Before publication, inspect every tracked path and run scripts/audit_public.py. Scan Git history too; deleting a secret from the current tree does not remove earlier commits. Do not commit credentials, private IPs, home-directory paths, personal recordings, real device serial numbers or calibration data. If a credential is ever exposed, revoke it before cleaning history.
-
-Report a security issue privately to the repository owner through GitHub's available security reporting controls; do not put live credentials in an issue.
+Report a vulnerability privately to the repository owner. Do not paste working credentials or personal data into a public issue.

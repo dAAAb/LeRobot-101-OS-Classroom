@@ -13,3 +13,11 @@ local-data/
 playwright-report/
 test-results/
 *.log
+
+*.egg-info/
+build/
+dist/
+.app-install/
+.app-cache/
+.venv-app/
+calibration/

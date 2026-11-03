@@ -10,13 +10,11 @@ export async function createVision(kind){
   const p=pose.detectForVideo(video,now),f=face?.detectForVideo(video,now),h=hands?.detectForVideo(video,now);
   // Anatomical right: input is unmirrored camera data. CSS mirrors only the preview.
   // Confirm with the highlighted wrist during setup; selfie cameras may differ.
-  let right=null;
-  if(h){for(let i=0;i<h.landmarks.length;i++){if(h.handedness[i]?.[0]?.categoryName==='Right')right=h.landmarks[i];}}
-  // Prefer spatial association with pose right wrist over classifier label.
-  if(h?.landmarks?.length&&p.landmarks[0]){
-   const wrist=p.landmarks[0][16];let best=.15;
-   for(const hand of h.landmarks){const d=Math.hypot(hand[0].x-wrist.x,hand[0].y-wrist.y);if(d<best){best=d;right=hand;}}
+  let right=null,rightWorld=null;
+  if(h?.landmarks?.length&&p.landmarks[0]?.[16]?.visibility>.55){
+   const wrist=p.landmarks[0][16];let best=.12;
+   h.landmarks.forEach((hand,i)=>{const d=Math.hypot(hand[0].x-wrist.x,hand[0].y-wrist.y);if(d<best){best=d;right=hand;rightWorld=h.worldLandmarks[i];}});
   }
-  return {pose:p.landmarks[0]??null,hand:right,matrix:f?.facialTransformationMatrixes[0]?.data??null};
+  return {pose:p.landmarks[0]??null,world:p.worldLandmarks[0]??null,hand:right,handWorld:rightWorld,matrix:f?.facialTransformationMatrixes[0]?.data??null};
  },close(){pose.close();face?.close();hands?.close();}};
 }

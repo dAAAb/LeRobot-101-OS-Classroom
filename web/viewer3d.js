@@ -16,7 +16,7 @@ const LOAD_TIMEOUT_MS = 20000;  // 逾時 → fallback
 
 const ARM_DEFS = {
   // yaw：真實桌面擺法＝兩臂並排、各自順時針轉 90°（俯視）正面朝前
-  leader:   { x: -0.18, yaw: -Math.PI / 2, tint: '#ffb37a', opacity: 0.85, urdf: './assets/so101/so101_leader.urdf' }, // 扳機手柄版（官方 STEP 自轉）
+  leader:   { x: -0.18, yaw: -Math.PI / 2, tint: '#ffb37a', opacity: 0.85, urdf: './assets/so101/so101_follower_cam.urdf' }, // 扳機手柄版（官方 STEP 自轉）
   follower: { x: +0.18, yaw: -Math.PI / 2, tint: '#ff7f2a', opacity: 1.0, urdf: './assets/so101/so101_follower_cam.urdf' }, // 含腕部相機
 };
 
