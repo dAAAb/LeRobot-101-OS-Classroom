@@ -18,11 +18,13 @@ export class StablePoseCapture {
 }
 
 export class PoseTween {
- constructor(start,goal,now,{speed=20,minDurationMs=1200,tolerance=2,settleMs=250,timeoutMs=6000,keys=ARM_AXES}={}){
+ constructor(start,goal,now,{speed=20,minDurationMs=1200,tolerance=3,settleMs=250,timeoutMs=6000,keys=ARM_AXES}={}){
   if(!finitePose(start,keys)||!finitePose(goal,keys)||!Number.isFinite(now)||speed<=0)throw new Error('無效起始對齊姿勢');
   this.start={...start};this.goal={...goal};this.startTime=now;this.keys=keys;
   // The maximum derivative of 6t^5 − 15t^4 + 10t^3 is 1.875.
   this.durationMs=Math.max(minDurationMs,1.875*maxError(start,goal,keys)/speed*1000);
+  // A powered gravity-loaded STS3215 can settle ~2.5° short with its existing
+  // controller settings. Allow 3° for arrival only; the 4° command envelope stays.
   this.tolerance=tolerance;this.settleMs=settleMs;this.timeoutMs=timeoutMs;this.settledSince=null;
  }
  sample(now,actual){

@@ -2,22 +2,30 @@
 const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
 const finite=p=>p&&[p.x,p.y,p.z].every(Number.isFinite);
 const visible=p=>finite(p)&&(p.visibility??1)>.55&&p.x>=.02&&p.x<=.98&&p.y>=.02&&p.y<=.98;
+// Hand Landmarker does not predict per-finger visibility. Its JS converter fills
+// absent visibility with 0; only Pose landmarks may use that field as confidence.
+export const handPointValid=p=>finite(p);
+const handInFrame=p=>finite(p)&&p.x>=.02&&p.x<=.98&&p.y>=.02&&p.y<=.98;
 const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z);
 const fingerPairs=[[5,8],[9,12],[13,16],[17,20]];
 
-export function measureGrasp(hand,world){
+export function inspectGrasp(hand,world){
  // Reject clipped/fabricated fingers; never interpret a missing hand as a closed fist.
- if(!hand||!world||hand.length!==21||world.length!==21||!hand.every(visible)||!world.every(finite))return null;
+ if(!hand)return {sample:null,reason:'no-hand'};
+ if(hand.length!==21||!hand.every(finite))return {sample:null,reason:'incomplete'};
+ if(!hand.every(handInFrame))return {sample:null,reason:'clipped'};
+ if(!world||world.length!==21||!world.every(finite))return {sample:null,reason:'no-depth'};
  const width=distance(world[5],world[17]),length=distance(world[0],world[9]);
- if(width<.015||width>.18||length<.025||length>.20)return null;
+ if(width<.015||width>.18||length<.025||length>.20)return {sample:null,reason:'geometry'};
  const pinchRatio=distance(world[4],world[8])/width;
  const pinchOpen=clamp((pinchRatio-.18)/.77,0,1);
  // A fist requires all four fingers to curl: a pointing finger alone is not a fist.
  const fingerOpen=fingerPairs.map(([base,tip])=>clamp((distance(world[tip],world[0])/Math.max(.015,distance(world[base],world[0]))-1.05)/.75,0,1));
  const fistOpen=Math.max(...fingerOpen);
  const openness=Math.min(pinchOpen,fistOpen);
- return {openness,pinchRatio,gesture:openness>.85?'open':pinchOpen<=fistOpen?'pinch':'fist'};
+ return {sample:{openness,pinchRatio,gesture:openness>.85?'open':pinchOpen<=fistOpen?'pinch':'fist'},reason:null};
 }
+export function measureGrasp(hand,world){return inspectGrasp(hand,world).sample;}
 
 export class GripperGesture {
  constructor({mode='analog',stableMs=140,closeAt=.30,openAt=.65}={}){
@@ -41,7 +49,7 @@ export class GripperGesture {
  }
 }
 
-export function selectRightHand(pose,result){
+export function selectRightHand(pose,result,{inputMirrored=false}={}){
  const hands=result?.landmarks??[],worlds=result?.worldLandmarks??[];
  const wrist=pose?.[16];
  if(visible(wrist)){
@@ -51,9 +59,12 @@ export function selectRightHand(pose,result){
   if(!candidates.length||candidates[1]&&candidates[1].d-candidates[0].d<.035)return {hand:null,handWorld:null};
   const index=candidates[0].index;return {hand:hands[index],handWorld:worlds[index]??null};
  }
- // Gripper-only use can work without the torso. Never fall back to an arbitrary hand.
+ // This pinned hand model labels a selfie/mirrored image. The actual video is
+ // unmirrored (CSS only mirrors its preview), so swap labels in hand-only mode.
+ // Body-wrist association above remains authoritative when it is available.
+ const rightLabel=inputMirrored?'Right':'Left';
  const candidates=hands.map((hand,index)=>({hand,index,side:result.handedness?.[index]?.[0]}))
-  .filter(({side})=>side?.categoryName==='Right'&&side.score>=.8);
+  .filter(({side})=>side?.categoryName===rightLabel&&side.score>=.8);
  if(candidates.length!==1)return {hand:null,handWorld:null};
  const {hand,index}=candidates[0];return {hand,handWorld:worlds[index]??null};
 }

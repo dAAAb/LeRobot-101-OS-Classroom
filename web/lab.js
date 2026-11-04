@@ -1,7 +1,7 @@
-import {Controller,REACHY_LIMITS,ARM_LIMITS,reachyMap,armMap,faceYaw,synthetic} from './control-core.js';
+import {Controller,REACHY_LIMITS,ARM_LIMITS,reachyMap,armMap,armTrackingIssue,hasTorsoReference,faceYaw,synthetic} from './control-core.js';
 import {createVision} from './vision.js';
 import {InputSession} from './input-session.js';
-import {GripperGesture,measureGrasp,applyGripperTarget} from './gripper-gesture.js';
+import {GripperGesture,inspectGrasp,applyGripperTarget} from './gripper-gesture.js';
 const $=id=>document.getElementById(id),kind=document.body.dataset.kind,limits=kind==='reachy'?REACHY_LIMITS:ARM_LIMITS;
 const ctrl=new Controller(limits);let mode='manual',vision=null,stream=null,busy=false,loading=false,lastFrame=-1,lastDetect=0,lastInput=null,center=0,seq=0,logs=[],sim=false,lastPost=0;
 let hardware=null,armBaseline=null,armAnchor=null,stableFrames=0,trackingHint='';
@@ -22,13 +22,20 @@ if(kind==='reachy'){
 }
 else{viewer=(await import('./viewer3d.js')).createViewer($('view'));viewer.setColors({leader:'#ffb37a',follower:'#71d8ff'});await viewer.ready;$('viewNote').textContent=viewer.usingFallback?'URDF 載入失敗：目前為 2D 備援示意。請檢查模型檔案。':$('viewNote').textContent;$('reachyOptions').hidden=true;$('calibrate').textContent='以目前手勢為基準';$('simToggle').hidden=true;}
 function status(t){$('status').textContent=t;}
+if(kind==='arm'){
+ const legend=document.createElement('div');legend.className='view-legend';
+ legend.innerHTML='<span class="target-label">橘色 · 你的目標姿勢</span><span class="actual-label" id="actualLegend">淺藍 · 模擬跟隨位置</span>';
+ $('view').before(legend);
+}
 function updateGrip(observation,now){
  if(kind!=='arm')return;
- gripReading=gripper.update(measureGrasp(observation?.hand,observation?.handWorld),now,ctrl.value.gripper);
- const percent=Math.round(gripReading.angle/80*100);
+ const inspected=inspectGrasp(observation?.hand,observation?.handWorld);
+ gripReading=gripper.update(inspected.sample,now,ctrl.value.gripper);
+ const percent=Math.round((gripReading.openness??gripReading.angle/80)*100);
  $('gripperMeter').value=percent;$('gripperMeter').textContent=percent+'%';$('gripperPercent').textContent=gripReading.ready?percent+'%':'—';
  const gesture={pinch:'兩指捏合',fist:'四指握拳',open:'手掌張開'}[gripReading.gesture]??'右手';
- $('gripperStatus').textContent=gripReading.state==='missing'?'右手看不清楚：保持夾爪位置，請將整隻右手移回畫面。':gripReading.state==='acquiring'?'已看到右手，正在確認穩定手勢…':gesture+' · '+(gripper.mode==='analog'?'目標張開 '+percent+'%':gripReading.state==='closed'?'ON · 夾住':gripReading.state==='open'?'OFF · 張開':'中間手勢 · 保持');
+ const reasons={'no-hand':'尚未找到可確認的右手','incomplete':'手指關鍵點不完整','clipped':'部分手指超出畫面邊緣','no-depth':'已看到手掌，但缺少有效的 3D 手指資料','geometry':'手掌的 3D 比例不穩定'};
+ $('gripperStatus').textContent=gripReading.state==='missing'?(reasons[inspected.reason]??'手勢資料不足')+'；夾爪保持原位。':gripReading.state==='acquiring'?'已看到右手，正在確認穩定手勢…':gesture+' · '+(gripper.mode==='analog'?'目標張開 '+percent+'%':gripReading.state==='closed'?'ON · 夾住':gripReading.state==='open'?'OFF · 張開':'中間手勢 · 保持');
 }
 function armTarget(observation){
  const body=armMap(observation.pose,observation.hand,{...observation,previous:ctrl.value,baseline:armBaseline,anchor:armAnchor});
@@ -49,7 +56,7 @@ $('replay').onclick=()=>{setMode('replay');ctrl.resume();status(kind==='reachy'?
 $('neutral').onclick=()=>{Object.keys(manual).forEach(k=>{manual[k]=0;$('j-'+k).value=0;$('o-'+k).textContent='0°';});setMode('manual');ctrl.resume();};
 $('calibrate').onclick=()=>{
  if(kind==='reachy'&&lastInput&&Number.isFinite(lastInput.yaw)){center=lastInput.yaw;status('已將目前頭部方向設為 0°。');}
- else if(kind==='arm'&&lastInput){const raw=armMap(lastInput.pose,lastInput.hand,{...lastInput,previous:ctrl.value});if(raw){armBaseline=raw;armAnchor={...ctrl.value};status('已對齊操作者手勢；這不會更改馬達的硬體校正。');}else status('請讓雙肩、髖部、右手肘和手腕入鏡。');}
+  else if(kind==='arm'&&lastInput){const raw=armMap(lastInput.pose,lastInput.hand,{...lastInput,previous:ctrl.value});if(raw){armBaseline=raw;armAnchor={...ctrl.value};status('已對齊操作者手勢；這不會更改馬達的硬體校正。');}else status('請讓雙肩、右手肘和手腕入鏡。');}
  else status('請先啟動攝影機追蹤或合成範例。');
 };
 $('cameraStart').onclick=async()=>{
@@ -82,7 +89,8 @@ function frame(now){
  updateGrip(lastInput,now);
  const observed=kind==='arm'?armTarget(lastInput):reachyMap({...lastInput,previous:ctrl.value});
  stableFrames=observed?Math.min(3,stableFrames+1):0;
- trackingHint=!observed?(kind==='arm'?'右手臂離開畫面或辨識不足：保持姿勢。請讓雙肩、髖部、右手肘與手腕回到框內。':'看不到頭與手：保持姿勢，請回到鏡頭前。'):stableFrames<3?'已重新看到你，正在確認連續三幀…':kind==='arm'&&!lastInput.hand?'手掌暫時看不到：肩肘繼續，手腕與夾爪保持。':'追蹤穩定。離開畫面會保持姿勢；回到框內後模擬器平順接續。';
+ trackingHint=!observed?(kind==='arm'?(armTrackingIssue(lastInput.pose,lastInput.world)??'右手臂方向不穩定')+'：手臂保持姿勢。夾爪辨識請看下方手勢狀態。':'看不到頭與手：保持姿勢，請回到鏡頭前。'):stableFrames<3?'已重新看到你，正在確認連續三幀…':kind==='arm'&&!lastInput.hand?'手掌暫時看不到：肩肘繼續，手腕與夾爪保持。':'鏡頭追蹤穩定。橘色顯示目標；淺藍色顯示跟隨結果。';
+ if(kind==='arm'&&observed&&!hasTorsoReference(lastInput.pose,lastInput.world))trackingHint+=' 坐姿參考：髖部未清楚入鏡，請保持鏡頭正立。';
  if(kind==='arm'&&$('gripperOnly').checked)trackingHint=gripReading?.ready?'只控制夾爪：手臂維持原位；捏合或握拳夾住，張開手放開。':'右手辨識不足：保持姿勢，請將整隻右手放入畫面。';
  overlay(lastInput);$('latency').textContent=Math.round(performance.now()-t)+' ms';}catch(e){lastInput=null;updateGrip(null,now);status('辨識失敗：'+e.message);}
  }
@@ -96,6 +104,7 @@ function frame(now){
   status(phase==='waiting'?'請保持起始手勢約半秒；確認穩定後才移動實體手臂。':['aligning','settling'].includes(phase)?'正在對齊固定起始姿勢；請保持手勢，等「對齊完成」後再移動。':(hardware?.connected&&!hardware.armed?'實體未啟用，目前只預覽。':'')+(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint));
  }
  const r=ctrl.tick(now),align=hardware?.alignment,aligning=hardware?.armed&&['waiting','aligning','settling'].includes(align?.phase);
+ if(kind==='arm')$('actualLegend').textContent=hardware?.connected?'淺藍 · 實體馬達回報位置':'淺藍 · 模擬跟隨位置';
  $('state').textContent=aligning?(align.phase==='waiting'?'實體 · 等待手勢':'實體 · 對齊 '+Math.round(align.progress*100)+'%'):(hardware?.armed?'實體 · ':hardware?.connected?'預覽 · ':'模擬 · ')+r.state;
  $('state').style.color=aligning?'#f4d29b':r.state==='TRACK'?'#8de4c0':r.state==='STOP'?'#ff9eac':'#f4d29b';$('age').textContent=r.age==null?'—':Math.round(r.age)+' ms';$('values').textContent=JSON.stringify({target,applied:r.value,state:r.state},null,2);
  if(kind==='reachy')viewer.set(r.value);else viewer.setJoints({leader:aligning&&hardware.alignmentGoal?hardware.alignmentGoal:target??r.value,follower:hardware?.actual??r.value});

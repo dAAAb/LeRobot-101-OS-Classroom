@@ -1,6 +1,6 @@
 // All angles in URDF degrees until an adapter. Pure mapping, no I/O.
 // MediaPipe uses unmirrored input. CSS mirroring is presentation only.
-import {measureGrasp} from './gripper-gesture.js';
+import {measureGrasp,handPointValid} from './gripper-gesture.js';
 export const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
 const rad=180/Math.PI;
 export const REACHY_LIMITS={yaw:[-35,35],left:[0,70],right:[0,70]};
@@ -31,14 +31,29 @@ const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
 const unit=a=>norm(a)>1e-6?a.map(v=>v/norm(a)):null;
 const projected=(a,n)=>a.map((v,i)=>v-dot(a,n)*n[i]);
 const signedAngle=(a,b,n)=>Math.atan2(dot(cross(a,b),n),dot(a,b))*rad;
+export const hasTorsoReference=(pose,world)=>[23,24].every(i=>good(pose?.[i])&&good(world?.[i]));
+export function armTrackingIssue(pose,world){
+ if(!pose)return '沒有辨識到身體';
+ const names={11:'左肩',12:'右肩',14:'右手肘',16:'右手腕',23:'左髖部參考',24:'右髖部參考'};
+ const missing=[11,12,14,16].filter(i=>!visible(pose[i]));
+ if(missing.length)return missing.map(i=>names[i]).join('、')+'不在畫面或信心不足';
+ if(!world||![11,12,14,16].every(i=>good(world[i])))return '身體 3D 方向還不穩定';
+ return null;
+}
 export function armMap(pose,hand,{world=null,handWorld=null,previous={},baseline=null,anchor=null}={}){
  // World landmarks are metres: unlike normalized x/y, their axes have the same scale.
- if(!pose||![11,12,14,16].every(i=>visible(pose[i]))||![23,24].every(i=>good(pose[i]))||!world)return null;
- const p=world;if(![11,12,14,16,23,24].every(i=>good(p[i])))return null;
+ if(armTrackingIssue(pose,world))return null;
+ const p=world;
  const right=unit(sub(p[12],p[11]));
  const shoulders={x:(p[11].x+p[12].x)/2,y:(p[11].y+p[12].y)/2,z:(p[11].z+p[12].z)/2};
- const hips={x:(p[23].x+p[24].x)/2,y:(p[23].y+p[24].y)/2,z:(p[23].z+p[24].z)/2};
- if(!right)return null;const up=unit(projected(sub(shoulders,hips),right));if(!up)return null;
+ // A seated webcam often clips the hips while the shoulder/elbow/wrist are clear.
+ // Use camera-up as an explicit fallback instead of rejecting a visible arm.
+ let torsoUp=[0,-1,0];
+ if(hasTorsoReference(pose,p)){
+  const hips={x:(p[23].x+p[24].x)/2,y:(p[23].y+p[24].y)/2,z:(p[23].z+p[24].z)/2};
+  torsoUp=sub(shoulders,hips);
+ }
+ if(!right)return null;const up=unit(projected(torsoUp,right));if(!up)return null;
  const forward=unit(cross(up,right)),upper=sub(p[14],p[12]),fore=sub(p[16],p[14]);
  if(!forward||norm(upper)<.04||norm(fore)<.04)return null;
  const horizontal=projected(upper,up),heading=norm(horizontal)>.08?horizontal:projected(fore,up);
@@ -46,7 +61,7 @@ export function armMap(pose,hand,{world=null,handWorld=null,previous={},baseline
   shoulder_lift:-angle(upper,up.map(v=>-v))*.5,
   // SO101 URDF +elbow lowers the forearm. Human flexion must decrease that angle.
   elbow_flex:90-angle(upper,fore),wrist_flex:previous.wrist_flex??0,wrist_roll:previous.wrist_roll??0,gripper:previous.gripper??35};
- if(hand&&handWorld&&[0,4,5,8,9,17].every(i=>good(hand[i])&&good(handWorld[i]))){
+ if(hand&&handWorld&&[0,4,5,8,9,17].every(i=>handPointValid(hand[i])&&handPointValid(handWorld[i]))){
   const palm=sub(handWorld[9],handWorld[0]),across=sub(handWorld[5],handWorld[17]),axis=unit(fore);
   const upright=unit(projected(up,axis));
   if(upright){const rightward=unit(cross(axis,upright));

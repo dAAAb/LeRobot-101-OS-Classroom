@@ -100,6 +100,7 @@ export function mergeCalibration(device,file){
 export class HardwareFollower{
  constructor(bus,{clock=()=>performance.now(),onState=()=>{}}={}){
   this.bus=bus;this.clock=clock;this.onState=onState;this.armed=false;this.connected=false;this.epoch=0;this.queue=Promise.resolve();this.target=null;this.lastTarget=-Infinity;this.actual=null;this.raw=null;this.calibration={};this.issues=[];this.lastStep=null;
+  this.commandRaw=null;this.feedback={};this.goal=null;this.limited=[];
   this.clearAlignment();
  }
  clearAlignment(){this.needsAlignment=false;this.poseCapture=null;this.alignmentGoal=null;this.alignment=null;this.alignmentStatus={phase:'off',progress:0};}
@@ -117,7 +118,12 @@ export class HardwareFollower{
  }
  importCalibration(file){if(this.armed)throw new Error('請先停止實體控制');this.calibration=mergeCalibration(this.calibration,file);this.issues=calibrationIssues(this.calibration);}
  async readPositions(){
-  const raw={};for(const name of JOINTS){raw[name]=signed(u16(await this.bus.read(this.calibration[name].id,REG.present,2)),15);}
+  const raw={},feedback={};for(const name of JOINTS){
+   const bytes=await this.bus.read(this.calibration[name].id,REG.present,15);
+   raw[name]=signed(u16(bytes),15);
+   feedback[name]={velocity:signed(u16(bytes,2),15),loadPercent:signed(u16(bytes,4),10)/10,voltage:bytes[6]/10,temperature:bytes[7],status:bytes[9],moving:bytes[10],currentRaw:u16(bytes,13)};
+  }
+  this.feedback=feedback;
   this.raw=raw;this.actual=Object.fromEntries(JOINTS.map(n=>[n,rawToJoint(raw[n],this.calibration[n])]));return raw;
  }
  positionRows(raw,speed=250){return JOINTS.map(n=>[this.calibration[n].id,[...word(raw[n]),0,0,...word(speed)]]);}
@@ -129,13 +135,13 @@ export class HardwareFollower{
    if(!this.connected||this.issues.length)throw new Error(this.issues.join('；')||'尚未連線');
    await this.readPositions();this.checkPositions();if(epoch!==this.epoch)return;
    // Seed current measured positions BEFORE torque enable, never the old screen target.
-   this.hasControl=true;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));if(epoch!==this.epoch)return;
+   this.hasControl=true;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.commandRaw={...this.raw};if(epoch!==this.epoch)return;
    await this.bus.syncWrite(REG.torque,1,JOINTS.map(n=>[this.calibration[n].id,[1]]));
    for(const n of JOINTS){if((await this.bus.read(this.calibration[n].id,REG.torque,1))[0]!==1)throw new Error(`${n}：未啟用扭力`);}
    if(epoch!==this.epoch)return;
    this.clearAlignment();this.needsAlignment=alignOnStart;
    if(alignOnStart){this.poseCapture=new StablePoseCapture();this.alignmentStatus={phase:'ready',progress:0};}
-   this.armed=true;this.target=null;this.lastTarget=-Infinity;this.lastStep=this.clock();this.onState('ARMED');
+   this.armed=true;this.target=null;this.goal=null;this.limited=[];this.lastTarget=-Infinity;this.lastStep=this.clock();this.onState('ARMED');
   }).catch(e=>{this.armed=false;this.onState('FAULT: '+e.message);throw e;});
  }
  submit(target,active,{alignmentTarget=target}={}){
@@ -156,7 +162,7 @@ export class HardwareFollower{
   if(!this.armed||epoch!==this.epoch)return;
   this.checkPositions();const now=this.clock();
   if(!this.target){this.lastStep=now;return;}
-  if(now-this.lastTarget>300){this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.onState('HOLD — 輸入逾時，需重新啟用');return;}
+  if(now-this.lastTarget>300){this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.commandRaw={...this.raw};this.onState('HOLD — 輸入逾時，需重新啟用');return;}
   const dt=clamp((now-this.lastStep)/1000,0,.15);this.lastStep=now;
   let goal=this.target;
   if(this.needsAlignment){
@@ -164,17 +170,25 @@ export class HardwareFollower{
    if(!this.alignment){this.alignment=new PoseTween(this.actual,{...this.alignmentGoal,gripper:this.actual.gripper},now);this.onState('ALIGNING — 已固定起始目標，平滑對齊中；夾爪保持原位');}
    const result=this.alignment.sample(now,this.actual);goal=result.pose;
    this.alignmentStatus={phase:result.phase,progress:result.progress,error:result.error,durationMs:result.durationMs};
-   if(result.phase==='timeout'){this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.onState('HOLD — 起始姿勢未能到位，已停止；請檢查手臂再重新啟用');return;}
+   if(result.phase==='timeout'){const error=result.error.toFixed(1);this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.commandRaw={...this.raw};this.onState(`HOLD — 起始姿勢未能到位（最大誤差 ${error}°），已停止；請檢查手臂再重新啟用`);return;}
    if(result.phase==='complete'){this.needsAlignment=false;this.alignmentStatus.phase='following';this.onState('TRACKING — 起始姿勢已對齊，開始即時跟隨');}
   }
-  // Goal never more than 4° ahead of MEASURED pose; 20°/s software limit.
+  // Ramp from the LAST SENT command, not from each new measured position. Resetting
+  // to actual every frame erased the servo's position error before a loaded joint
+  // could overcome its dead zone/gravity. Keep the same 4° measured-position bound.
   const ticks=Math.min(4,20*dt)*4096/360;
-  const next=Object.fromEntries(JOINTS.map(n=>[n,Math.round(this.raw[n]+clamp(jointToRaw(goal[n],this.calibration[n])-this.raw[n],-ticks,ticks))]));
-  if(this.armed&&epoch===this.epoch)await this.bus.syncWrite(REG.goal,6,this.positionRows(next));
+  const lead=Math.floor(4*4096/360);this.goal={...goal};this.limited=[];
+  const next=Object.fromEntries(JOINTS.map(n=>{
+   const c=this.calibration[n],desired=jointToRaw(goal[n],c),previous=this.commandRaw?.[n]??this.raw[n];
+   if(Math.abs(rawToJoint(desired,c)-goal[n])>.2)this.limited.push(n);
+   const ramped=previous+clamp(desired-previous,-ticks,ticks);
+   return [n,Math.round(clamp(ramped,Math.max(c.range_min+12,this.raw[n]-lead),Math.min(c.range_max-12,this.raw[n]+lead)))];
+  }));
+  if(this.armed&&epoch===this.epoch){await this.bus.syncWrite(REG.goal,6,this.positionRows(next));this.commandRaw=next;}
  }).catch(e=>{this.armed=false;this.epoch++;this.connected=false;this.onState('FAULT: '+e.message);throw e;});}
  stop(reason='已停止追蹤'){
   this.armed=false;this.target=null;this.clearAlignment();this.epoch++;this.onState('HOLD — '+reason);
-  return this.exclusive(async()=>{if(!this.connected||!this.hasControl)return;await this.readPositions();await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));}).catch(e=>{this.connected=false;this.onState('FAULT: '+e.message);});
+  return this.exclusive(async()=>{if(!this.connected||!this.hasControl)return;await this.readPositions();await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.commandRaw={...this.raw};}).catch(e=>{this.connected=false;this.onState('FAULT: '+e.message);});
  }
  async disconnect(){await this.stop();this.connected=false;await this.bus.close();this.onState('DISCONNECTED');}
 }

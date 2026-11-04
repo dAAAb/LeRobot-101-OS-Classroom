@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {measureGrasp,GripperGesture,selectRightHand,applyGripperTarget} from '../web/gripper-gesture.js';
+import {measureGrasp,inspectGrasp,GripperGesture,selectRightHand,applyGripperTarget} from '../web/gripper-gesture.js';
 import {Controller,ARM_LIMITS} from '../web/control-core.js';
 
 function handFixture(gesture='open'){
@@ -21,6 +21,17 @@ test('open palm, thumb/index pinch and whole fist map to the correct jaw directi
   const {hand,world}=handFixture(gesture),result=measureGrasp(hand,world);
   assert.equal(result.openness,openness,gesture);assert.equal(result.gesture,gesture);
  }
+});
+test('real MediaPipe hand output with default visibility=0 remains usable',()=>{
+ for(const [gesture,openness]of[['open',1],['pinch',0],['fist',0]]){
+  const {hand,world}=handFixture(gesture);
+  for(const point of [...hand,...world])point.visibility=0;
+  assert.equal(measureGrasp(hand,world).openness,openness);
+ }
+ const {hand,world}=handFixture();hand[8].x=1.05;
+ assert.equal(inspectGrasp(hand,world).reason,'clipped');
+ assert.equal(inspectGrasp(null,world).reason,'no-hand');
+ assert.equal(inspectGrasp(handFixture().hand,null).reason,'no-depth');
 });
 test('partial pinch produces an intermediate analog angle, independent of hand size, rotation and display mirroring',()=>{
  const {hand,world}=handFixture();world[4]={...world[8],x:world[8].x-.033};
@@ -79,10 +90,12 @@ test('gripper targets still pass through smoothing, speed limit and tracking-los
 });
 test('hand-only selection requires one confidently identified right hand; never picks left or ambiguous hands',()=>{
  const {hand,world}=handFixture();
- const result={landmarks:[hand],worldLandmarks:[world],handedness:[[{categoryName:'Right',score:.95}]]};
+ const result={landmarks:[hand],worldLandmarks:[world],handedness:[[{categoryName:'Left',score:.95}]]};
  assert.equal(selectRightHand(null,result).hand,hand);
- result.handedness[0][0].categoryName='Left';assert.equal(selectRightHand(null,result).hand,null);
- result.handedness[0][0]={categoryName:'Right',score:.6};assert.equal(selectRightHand(null,result).hand,null);
+ assert.equal(selectRightHand(null,result,{inputMirrored:true}).hand,null);
+ result.handedness[0][0].categoryName='Right';assert.equal(selectRightHand(null,result).hand,null);
+ assert.equal(selectRightHand(null,result,{inputMirrored:true}).hand,hand);
+ result.handedness[0][0]={categoryName:'Left',score:.6};assert.equal(selectRightHand(null,result).hand,null);
  result.handedness[0][0].score=.95;result.landmarks.push(hand);result.handedness.push(result.handedness[0]);
  assert.equal(selectRightHand(null,result).hand,null);
 });

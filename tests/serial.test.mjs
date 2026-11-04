@@ -7,7 +7,7 @@ const records=()=>Object.fromEntries(JOINTS.map((n,i)=>[n,{id:i+1,model:777,mode
 class MockBus{
  constructor(){this.cal=records();this.raw=Object.fromEntries(JOINTS.map(n=>[n,2047]));this.writes=[];this.torque=0;}
  async open(){}async close(){this.closed=true;}
- async read(id,addr,size){const n=JOINTS[id-1],c=this.cal[n];if(addr===REG.model)return word(c.model);if(addr===REG.min)return [...word(c.range_min),...word(c.range_max)];if(addr===REG.homing)return word(c.homing_offset<0?(-c.homing_offset)|2048:c.homing_offset);if(addr===REG.mode)return[c.mode];if(addr===REG.present)return word(this.raw[n]);if(addr===REG.torque)return[this.torque];throw new Error('unmocked read');}
+ async read(id,addr,size){const n=JOINTS[id-1],c=this.cal[n];if(addr===REG.model)return word(c.model);if(addr===REG.min)return [...word(c.range_min),...word(c.range_max)];if(addr===REG.homing)return word(c.homing_offset<0?(-c.homing_offset)|2048:c.homing_offset);if(addr===REG.mode)return[c.mode];if(addr===REG.present)return [...word(this.raw[n]),0,0,0,0,120,30,0,0,0,0,0,0,0].slice(0,size);if(addr===REG.torque)return[this.torque];throw new Error('unmocked read');}
  async syncWrite(addr,size,rows){this.writes.push({addr,size,rows});if(addr===REG.torque)this.torque=rows[0][1][0];}
 }
 test('Feetech read packet has expected bytes and checksum',()=>{assert.deepEqual([...packet(1,2,[56,2])],[255,255,1,4,2,56,2,190]);});
@@ -19,6 +19,19 @@ test('connect/disconnect are strictly read-only; no torque or calibration writes
 test('unknown model fails handshake before any write',async()=>{const b=new MockBus();b.cal.elbow_flex.model=11272;const h=new HardwareFollower(b);await assert.rejects(h.connect(),/STS3215/);assert.equal(b.writes.length,0);assert.ok(b.closed);});
 test('arming requires confirmation, seeds actual positions, then enables torque',async()=>{const b=new MockBus(),h=new HardwareFollower(b);b.raw.elbow_flex=2300;await h.connect();await assert.rejects(h.arm(false));assert.equal(b.writes.length,0);await h.arm(true);assert.equal(b.writes[0].addr,42);assert.deepEqual(b.writes[0].rows[2][1].slice(0,2),word(2300));assert.equal(b.writes[1].addr,40);assert.equal(h.target,null);});
 test('target is limited relative to measured pose; stale command latches HOLD',async()=>{let now=0;const b=new MockBus(),h=new HardwareFollower(b,{clock:()=>now});await h.connect();await h.arm(true);h.submit(Object.fromEntries(JOINTS.map(n=>[n,70])),true);now=100;await h.step();const row=b.writes.at(-1).rows[0][1];assert.ok(row[0]+row[1]*256-2047<=23);now=500;await h.step();assert.equal(h.armed,false);assert.deepEqual(b.writes.at(-1).rows[0][1].slice(0,2),word(2047));});
+test('loaded shoulder can accumulate command error across frames without exceeding the existing 4 degree envelope',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now});await hw.connect();await hw.arm(true);
+ const original=bus.syncWrite.bind(bus);const initial=bus.raw.shoulder_lift;
+ bus.syncWrite=async(addr,size,rows)=>{await original(addr,size,rows);if(addr===REG.goal){for(const[id,bytes]of rows){const n=JOINTS[id-1],goal=bytes[0]+256*bytes[1],diff=goal-bus.raw[n];assert.ok(Math.abs(diff)<=45);if(Math.abs(diff)>30)bus.raw[n]+=Math.sign(diff)*12;}}};
+ for(now=100;now<=1200;now+=100){hw.submit({...hw.actual,shoulder_lift:30},true);await hw.step();}
+ assert.ok(bus.raw.shoulder_lift>initial+80,'old actual+2 degree reset never crosses a 30-tick dead zone');
+ assert.equal(hw.feedback.shoulder_lift.voltage,12);
+});
+test('an immobile motor never builds an unbounded position command',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now});await hw.connect();await hw.arm(true);
+ for(now=100;now<=2000;now+=100){hw.submit({...hw.actual,shoulder_lift:60},true);await hw.step();assert.ok(Math.abs(hw.commandRaw.shoulder_lift-bus.raw.shoulder_lift)<=45);}
+ await hw.stop();assert.deepEqual(hw.commandRaw,bus.raw);
+});
 test('stop during an outstanding read prevents subsequent motion target',async()=>{const b=new MockBus(),h=new HardwareFollower(b);await h.connect();await h.arm(true);h.submit(Object.fromEntries(JOINTS.map(n=>[n,70])),true);let release;const original=b.read.bind(b);let once=true;b.read=async(...args)=>{if(once&&args[1]===56){once=false;await new Promise(r=>release=r);}return original(...args);};const step=h.step();await new Promise(r=>setImmediate(r));const stopped=h.stop();release();await step;await stopped;assert.equal(h.armed,false);assert.deepEqual(b.writes.at(-1).rows[0][1].slice(0,2),word(2047));});
 test('SerialBus rejects EEPROM writes and poisons timed-out connection',async()=>{const port={async open(){},async close(){},writable:new WritableStream({write(){}}),readable:new ReadableStream({start(){},cancel(){}})};const b=new SerialBus(port,{timeout:10});await b.open();await assert.rejects(b.syncWrite(31,2,[[1,[0,0]]]),/禁止/);await assert.rejects(b.read(1,56,2),/逾時/);await assert.rejects(b.read(2,56,2),/逾時/);await b.close();});
 

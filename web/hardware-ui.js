@@ -1,4 +1,4 @@
-import {HardwareFollower,SerialBus,JOINTS} from './feetech-serial.js';
+import {HardwareFollower,SerialBus,JOINTS,rawToJoint} from './feetech-serial.js';
 export function mountHardware({stopSimulation,setPose,shouldAlign=()=>false}){
  const panel=document.createElement('section');panel.className='panel controls';
  panel.innerHTML=`<h2>04　USB 實體 Follower（選配）</h2>
@@ -10,6 +10,7 @@ export function mountHardware({stopSimulation,setPose,shouldAlign=()=>false}){
  <p><small>按「接手／繼續」後先保持手勢約半秒，等對齊完成再動。對齊途中夾爪保持原位；只控制夾爪與手動滑桿會略過這一步。</small></p>
  <div class="row"><button id="usbArm" class="primary" disabled>啟用實體控制</button><button id="usbHold" class="danger" disabled>停止實體追蹤</button></div>
  <div id="usbAlignPanel" hidden><label for="usbAlignProgress">起始姿勢對齊進度</label><progress id="usbAlignProgress" max="100" value="0"></progress><p id="usbAlignInfo"></p></div>
+ <div id="usbFeedback" hidden><p>橘色是目標；淺藍色是實體回報。角度單位為度。</p><div class="feedback-scroll"><table><thead><tr><th>關節</th><th>希望到達</th><th>已送命令</th><th>實際位置</th><th>命令差距</th><th>電壓</th><th>馬達輸出</th></tr></thead><tbody id="usbJointRows"></tbody></table></div><p id="usbFeedbackHint" role="status"></p></div>
  <p class="note">停止會保持目前姿勢，不會讓手臂突然失去支撐。這是軟體停止，不能取代硬體斷電急停；瀏覽器當機或拔 USB 時，馬達仍可能保有扭力。從小角度、無負載開始測試。</p>
  <details><summary>EEPROM 與實際角度（只顯示於此頁，不上傳）</summary><pre id="usbValues" class="log"></pre></details>`;
  document.querySelector('main').insertBefore(panel,document.querySelector('.footer'));
@@ -28,8 +29,15 @@ export function mountHardware({stopSimulation,setPose,shouldAlign=()=>false}){
   $('usbAlignProgress').value=Math.round(alignment.progress*100);
   const phases={ready:'已準備好。按上方「接手／繼續」，再保持起始手勢。',waiting:'等待穩定手勢：請維持約半秒。',aligning:'平滑對齊中：'+Math.round(alignment.progress*100)+'% · 請保持手勢，隨時可按停止。',settling:'路徑已走完，等待馬達實際到位。',following:'對齊完成，現在可以移動右手讓手臂跟隨。'};
   $('usbAlignInfo').textContent=phases[alignment.phase]??'';
+  $('usbFeedback').hidden=!connected;
+  if(connected){
+   const names=['肩部左右','肩部抬起','手肘彎曲','手腕彎曲','手腕旋轉','夾爪'];
+   const format=value=>Number.isFinite(value)?value.toFixed(1):'—';
+   $('usbJointRows').innerHTML=JOINTS.map((n,i)=>{const c=hw.calibration[n],sent=hw.commandRaw?rawToJoint(hw.commandRaw[n],c):null,f=hw.feedback[n];return `<tr><th>${names[i]}</th><td>${format(hw.goal?.[n])}</td><td>${format(sent)}</td><td>${format(hw.actual?.[n])}</td><td>${sent===null?'—':format(sent-hw.actual[n])}</td><td>${format(f?.voltage)} V</td><td>${format(f?.loadPercent)}%</td></tr>`;}).join('');
+   $('usbFeedbackHint').textContent=hw.limited.length?'部分目標超出這支手臂的既有行程，已限制在校正範圍內：'+hw.limited.map(n=>names[JOINTS.indexOf(n)]).join('、'):'若已送命令改變但實際位置不動，問題在馬達跟隨；先停止，再查供電、負載與行程。';
+  }
   for(const id of ['delay','jitter','drop']){$(id).disabled=!!hw?.armed;if(hw?.armed)$(id).value='0';}
-  $('usbValues').textContent=JSON.stringify({state:!connected?'DISCONNECTED':hw.armed?'ARMED':hw.hasControl?'HOLD':'READ ONLY',alignment,calibration:hw?.calibration,issues:hw?.issues,measuredURDFDegrees:hw?.actual,recentEvents:events},null,2);
+  $('usbValues').textContent=JSON.stringify({state:!connected?'DISCONNECTED':hw.armed?'ARMED':hw.hasControl?'HOLD':'READ ONLY',alignment,calibration:hw?.calibration,issues:hw?.issues,measuredURDFDegrees:hw?.actual,feedback:hw?.feedback,recentEvents:events},null,2);
  }
  if(!('serial'in navigator))msg('這個瀏覽器沒有 Web Serial；請用桌面 Chrome／Edge 開啟 localhost 或 HTTPS。模擬仍可使用。');
  $('usbConnect').onclick=async()=>{

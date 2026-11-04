@@ -30,3 +30,11 @@ test('elapsed time is not enough: handoff requires actual motor arrival and sett
  assert.equal(tween.sample(end+400,goal).phase,'complete');
  const stuck=new PoseTween(start,goal,0);assert.equal(stuck.sample(stuck.durationMs+6001,start).phase,'timeout');
 });
+test('arrival accepts a small loaded-servo offset but rejects a motor outside the 3 degree tolerance',()=>{
+ const start=pose(),goal=pose(20),tween=new PoseTween(start,goal,0),end=tween.durationMs;
+ const loaded={...goal,elbow_flex:22.5};
+ assert.equal(tween.sample(end,loaded).phase,'settling');
+ assert.equal(tween.sample(end+251,loaded).phase,'complete');
+ const stuck=new PoseTween(start,goal,0),outside={...goal,elbow_flex:23.1};
+ assert.equal(stuck.sample(stuck.durationMs+6001,outside).phase,'timeout');
+});

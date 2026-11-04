@@ -11,7 +11,7 @@ export async function createVision(kind){
   const p=pose.detectForVideo(video,now),f=face?.detectForVideo(video,now),h=hands?.detectForVideo(video,now);
   // Anatomical right: input is unmirrored camera data. CSS mirrors only the preview.
   // Confirm with the highlighted wrist during setup; selfie cameras may differ.
-  const right=selectRightHand(p.landmarks[0],h);
+  const right=selectRightHand(p.landmarks[0],h,{inputMirrored:false});
   return {pose:p.landmarks[0]??null,world:p.worldLandmarks[0]??null,...right,matrix:f?.facialTransformationMatrixes[0]?.data??null};
  },close(){pose.close();face?.close();hands?.close();}};
 }

@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {armMap,reachyMap,synthetic} from '../web/control-core.js';
+import {armMap,armTrackingIssue,hasTorsoReference,reachyMap,synthetic} from '../web/control-core.js';
 function person(){
  const a=synthetic(0);a.world=Array.from({length:33},()=>({x:0,y:0,z:0,visibility:1}));
  for(const [i,x,y,z] of [[11,.2,-.5,0],[12,-.2,-.5,0],[23,.15,0,0],[24,-.15,0,0],[14,-.2,-.2,0],[16,-.2,-.2,-.3]])a.world[i]={x,y,z,visibility:1};
@@ -21,6 +21,18 @@ test('body coordinates are invariant to translation, distance and torso roll',()
 });
 test('missing hand holds wrist and gripper; missing 3D pose does not use distorted image coordinates',()=>{
  const a=person(),out=armMap(a.pose,null,{...a,previous:{wrist_flex:12,wrist_roll:23,gripper:45}});assert.equal(out.gripper,45);assert.equal(out.wrist_roll,23);assert.equal(armMap(a.pose,a.hand),null);
+});
+test('hand visibility placeholders do not freeze wrist motion or gripper mapping',()=>{
+ const a=person();const expected=armMap(a.pose,a.hand,a);
+ for(const point of [...a.hand,...a.handWorld])point.visibility=0;
+ assert.deepEqual(armMap(a.pose,a.hand,a),expected);
+});
+test('seated user can move shoulder and elbow with low-confidence hips; missing wrist still holds',()=>{
+ const a=person();for(const i of [23,24]){a.pose[i].visibility=.1;a.world[i].visibility=.1;}
+ assert.equal(hasTorsoReference(a.pose,a.world),false);assert.equal(armTrackingIssue(a.pose,a.world),null);
+ const start=armMap(a.pose,null,a);a.world[14]={x:-.2,y:-.5,z:-.3,visibility:1};a.world[16]={x:-.2,y:-.5,z:-.6,visibility:1};
+ const raised=armMap(a.pose,null,a);assert.ok(raised.shoulder_lift<start.shoulder_lift);
+ a.pose[16].visibility=.1;assert.equal(armMap(a.pose,null,a),null);assert.match(armTrackingIssue(a.pose,a.world),/右手腕/);
 });
 test('mirror mode applies to head and both arms consistently',()=>{
  const a=synthetic(1);a.yaw=20;a.pose[16].y=.04;a.pose[15].y=.9;
