@@ -1,5 +1,6 @@
 // Web Serial → Feetech STS3215 protocol 0. No EEPROM writes, calibration or port scans.
 // Register definitions: Hugging Face LeRobot v0.4.4; protocol: ftservo/FTServo_Python.
+import {StablePoseCapture,PoseTween} from './pose-handoff.js';
 export const JOINTS=['shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll','gripper'];
 export const REG={model:3,min:9,max:11,homing:31,mode:33,torque:40,goal:42,present:56};
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -99,7 +100,9 @@ export function mergeCalibration(device,file){
 export class HardwareFollower{
  constructor(bus,{clock=()=>performance.now(),onState=()=>{}}={}){
   this.bus=bus;this.clock=clock;this.onState=onState;this.armed=false;this.connected=false;this.epoch=0;this.queue=Promise.resolve();this.target=null;this.lastTarget=-Infinity;this.actual=null;this.raw=null;this.calibration={};this.issues=[];this.lastStep=null;
+  this.clearAlignment();
  }
+ clearAlignment(){this.needsAlignment=false;this.poseCapture=null;this.alignmentGoal=null;this.alignment=null;this.alignmentStatus={phase:'off',progress:0};}
  exclusive(fn){const p=this.queue.then(fn);this.queue=p.catch(()=>{});return p;}
  async connect(){
   await this.bus.open();
@@ -119,7 +122,7 @@ export class HardwareFollower{
  }
  positionRows(raw,speed=250){return JOINTS.map(n=>[this.calibration[n].id,[...word(raw[n]),0,0,...word(speed)]]);}
  checkPositions(){for(const n of JOINTS){const c=this.calibration[n],p=this.raw[n];if(p<c.range_min||p>c.range_max)throw new Error(`${n}：目前位置超出 EEPROM 校正範圍`);}}
- arm(confirmedFollower){
+ arm(confirmedFollower,{alignOnStart=false}={}){
   if(!confirmedFollower)return Promise.reject(new Error('請確認所選 USB 是標準 SO-101 Follower，並核對模型姿勢'));
   const epoch=++this.epoch;
   return this.exclusive(async()=>{
@@ -130,13 +133,22 @@ export class HardwareFollower{
    await this.bus.syncWrite(REG.torque,1,JOINTS.map(n=>[this.calibration[n].id,[1]]));
    for(const n of JOINTS){if((await this.bus.read(this.calibration[n].id,REG.torque,1))[0]!==1)throw new Error(`${n}：未啟用扭力`);}
    if(epoch!==this.epoch)return;
+   this.clearAlignment();this.needsAlignment=alignOnStart;
+   if(alignOnStart){this.poseCapture=new StablePoseCapture();this.alignmentStatus={phase:'ready',progress:0};}
    this.armed=true;this.target=null;this.lastTarget=-Infinity;this.lastStep=this.clock();this.onState('ARMED');
   }).catch(e=>{this.armed=false;this.onState('FAULT: '+e.message);throw e;});
  }
- submit(target,active){
+ submit(target,active,{alignmentTarget=target}={}){
   if(!this.armed)return;
   if(!active||!target||!JOINTS.every(n=>Number.isFinite(target[n]))){this.stop();return;}
   this.target={...target};this.lastTarget=this.clock();
+  if(this.needsAlignment&&!this.alignmentGoal){
+   if(!alignmentTarget||!JOINTS.every(n=>Number.isFinite(alignmentTarget[n]))){this.stop('起始姿勢資料不完整');return;}
+   const bounded=Object.fromEntries(JOINTS.map(n=>[n,rawToJoint(jointToRaw(alignmentTarget[n],this.calibration[n]),this.calibration[n])]));
+   if(this.alignmentStatus.phase!=='waiting')this.onState('ALIGN WAIT — 請保持起始手勢約半秒，再平滑對齊');
+   this.alignmentStatus={phase:'waiting',progress:0};
+   this.alignmentGoal=this.poseCapture.update(bounded,this.lastTarget);
+  }
  }
  step(){return this.exclusive(async()=>{
   if(!this.connected)return;
@@ -144,15 +156,24 @@ export class HardwareFollower{
   if(!this.armed||epoch!==this.epoch)return;
   this.checkPositions();const now=this.clock();
   if(!this.target){this.lastStep=now;return;}
-  if(now-this.lastTarget>300){this.armed=false;this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.onState('HOLD — 輸入逾時，需重新啟用');return;}
+  if(now-this.lastTarget>300){this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.onState('HOLD — 輸入逾時，需重新啟用');return;}
   const dt=clamp((now-this.lastStep)/1000,0,.15);this.lastStep=now;
+  let goal=this.target;
+  if(this.needsAlignment){
+   if(!this.alignmentGoal)return; // No motion until one stable, bounded pose is captured.
+   if(!this.alignment){this.alignment=new PoseTween(this.actual,{...this.alignmentGoal,gripper:this.actual.gripper},now);this.onState('ALIGNING — 已固定起始目標，平滑對齊中；夾爪保持原位');}
+   const result=this.alignment.sample(now,this.actual);goal=result.pose;
+   this.alignmentStatus={phase:result.phase,progress:result.progress,error:result.error,durationMs:result.durationMs};
+   if(result.phase==='timeout'){this.armed=false;this.target=null;this.clearAlignment();this.epoch++;await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));this.onState('HOLD — 起始姿勢未能到位，已停止；請檢查手臂再重新啟用');return;}
+   if(result.phase==='complete'){this.needsAlignment=false;this.alignmentStatus.phase='following';this.onState('TRACKING — 起始姿勢已對齊，開始即時跟隨');}
+  }
   // Goal never more than 4° ahead of MEASURED pose; 20°/s software limit.
   const ticks=Math.min(4,20*dt)*4096/360;
-  const next=Object.fromEntries(JOINTS.map(n=>[n,Math.round(this.raw[n]+clamp(jointToRaw(this.target[n],this.calibration[n])-this.raw[n],-ticks,ticks))]));
+  const next=Object.fromEntries(JOINTS.map(n=>[n,Math.round(this.raw[n]+clamp(jointToRaw(goal[n],this.calibration[n])-this.raw[n],-ticks,ticks))]));
   if(this.armed&&epoch===this.epoch)await this.bus.syncWrite(REG.goal,6,this.positionRows(next));
  }).catch(e=>{this.armed=false;this.epoch++;this.connected=false;this.onState('FAULT: '+e.message);throw e;});}
  stop(reason='已停止追蹤'){
-  this.armed=false;this.target=null;this.epoch++;this.onState('HOLD — '+reason);
+  this.armed=false;this.target=null;this.clearAlignment();this.epoch++;this.onState('HOLD — '+reason);
   return this.exclusive(async()=>{if(!this.connected||!this.hasControl)return;await this.readPositions();await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));}).catch(e=>{this.connected=false;this.onState('FAULT: '+e.message);});
  }
  async disconnect(){await this.stop();this.connected=false;await this.bus.close();this.onState('DISCONNECTED');}

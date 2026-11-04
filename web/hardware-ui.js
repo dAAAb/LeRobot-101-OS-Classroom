@@ -1,12 +1,15 @@
 import {HardwareFollower,SerialBus,JOINTS} from './feetech-serial.js';
-export function mountHardware({stopSimulation,setPose}){
+export function mountHardware({stopSimulation,setPose,shouldAlign=()=>false}){
  const panel=document.createElement('section');panel.className='panel controls';
  panel.innerHTML=`<h2>04　USB 實體 Follower（選配）</h2>
  <p>Chrome／Edge 桌面版 · Web Serial · STS3215 / ID 1–6 / 1 Mbps。連線時只讀取，保留馬達內的校正資料。</p>
  <div class="row"><button id="usbConnect">選擇 USB／讀取手臂</button><button id="usbDisconnect" disabled>中斷 USB</button><label>匯入既有校正 JSON <input id="usbCalibration" type="file" accept=".json,application/json" disabled></label></div>
  <p id="usbStatus" role="status">未連線；目前只有模擬。選擇 Follower 的 USB 後會先讀取既有校正與位置。</p>
  <label><input id="usbConfirm" type="checkbox">我選的是 Follower，已確認畫面姿勢與實體一致、手臂周圍無障礙</label>
+ <div class="row"><label><input id="usbAlign" type="checkbox" checked>攝影機整臂控制：先對齊起始姿勢，再追蹤</label></div>
+ <p><small>按「接手／繼續」後先保持手勢約半秒，等對齊完成再動。對齊途中夾爪保持原位；只控制夾爪與手動滑桿會略過這一步。</small></p>
  <div class="row"><button id="usbArm" class="primary" disabled>啟用實體控制</button><button id="usbHold" class="danger" disabled>停止實體追蹤</button></div>
+ <div id="usbAlignPanel" hidden><label for="usbAlignProgress">起始姿勢對齊進度</label><progress id="usbAlignProgress" max="100" value="0"></progress><p id="usbAlignInfo"></p></div>
  <p class="note">停止會保持目前姿勢，不會讓手臂突然失去支撐。這是軟體停止，不能取代硬體斷電急停；瀏覽器當機或拔 USB 時，馬達仍可能保有扭力。從小角度、無負載開始測試。</p>
  <details><summary>EEPROM 與實際角度（只顯示於此頁，不上傳）</summary><pre id="usbValues" class="log"></pre></details>`;
  document.querySelector('main').insertBefore(panel,document.querySelector('.footer'));
@@ -19,8 +22,14 @@ export function mountHardware({stopSimulation,setPose}){
   $('usbDisconnect').disabled=!hw||arming;$('usbCalibration').disabled=!connected||!!hw?.armed||arming;
   $('usbArm').disabled=!connected||!!hw.issues.length||!!hw.armed||arming||!$('usbConfirm').checked;
   $('usbHold').disabled=!connected||!hw.hasControl;
+  $('usbAlign').disabled=!!hw?.armed||arming;
+  const alignment=hw?.alignmentStatus??{phase:'off',progress:0};
+  $('usbAlignPanel').hidden=!hw?.armed||alignment.phase==='off';
+  $('usbAlignProgress').value=Math.round(alignment.progress*100);
+  const phases={ready:'已準備好。按上方「接手／繼續」，再保持起始手勢。',waiting:'等待穩定手勢：請維持約半秒。',aligning:'平滑對齊中：'+Math.round(alignment.progress*100)+'% · 請保持手勢，隨時可按停止。',settling:'路徑已走完，等待馬達實際到位。',following:'對齊完成，現在可以移動右手讓手臂跟隨。'};
+  $('usbAlignInfo').textContent=phases[alignment.phase]??'';
   for(const id of ['delay','jitter','drop']){$(id).disabled=!!hw?.armed;if(hw?.armed)$(id).value='0';}
-  $('usbValues').textContent=JSON.stringify({state:!connected?'DISCONNECTED':hw.armed?'ARMED':hw.hasControl?'HOLD':'READ ONLY',calibration:hw?.calibration,issues:hw?.issues,measuredURDFDegrees:hw?.actual,recentEvents:events},null,2);
+  $('usbValues').textContent=JSON.stringify({state:!connected?'DISCONNECTED':hw.armed?'ARMED':hw.hasControl?'HOLD':'READ ONLY',alignment,calibration:hw?.calibration,issues:hw?.issues,measuredURDFDegrees:hw?.actual,recentEvents:events},null,2);
  }
  if(!('serial'in navigator))msg('這個瀏覽器沒有 Web Serial；請用桌面 Chrome／Edge 開啟 localhost 或 HTTPS。模擬仍可使用。');
  $('usbConnect').onclick=async()=>{
@@ -39,7 +48,7 @@ export function mountHardware({stopSimulation,setPose}){
  };
  $('usbArm').onclick=async()=>{
   if(arming)return;arming=true;stopSimulation();update();
-  try{await hw.arm($('usbConfirm').checked);if(hw.armed){setPose(hw.actual);msg('實體已啟用，已保留目前輸入模式。按上方「接手／繼續」後才追蹤。');}else msg('啟用已被停止；請確認此分頁在前景，再重新啟用。');}
+  try{await hw.arm($('usbConfirm').checked,{alignOnStart:$('usbAlign').checked&&shouldAlign()});if(hw.armed){setPose(hw.actual);msg(hw.needsAlignment?'實體已啟用。按上方「接手／繼續」，先對齊起始姿勢，再開始跟隨。':'實體已啟用，已保留目前輸入模式。按上方「接手／繼續」後才追蹤。');}else msg('啟用已被停止；請確認此分頁在前景，再重新啟用。');}
   catch(e){msg('未啟用：'+e.message);}finally{arming=false;update();}
  };
  $('usbConfirm').onchange=update;
@@ -52,11 +61,13 @@ export function mountHardware({stopSimulation,setPose}){
  return {
   get connected(){return !!hw?.connected;},
   get armed(){return !!hw?.armed;},
+  get alignment(){return hw?.alignmentStatus??{phase:'off',progress:0};},
+  get alignmentGoal(){return hw?.alignment?.goal??hw?.alignmentGoal??null;},
   get actual(){return hw?.connected?hw.actual:null;},
   stop(reason){return hw?.stop(reason);},
-  tick(value,active){
+  tick(value,active,requestedTarget=value){
    // A just-armed device may wait for the explicit simulation resume without disarming.
-   if(hw?.armed&&active)hw.submit(value,true);
+   if(hw?.armed&&active&&requestedTarget)hw.submit(value,true,{alignmentTarget:requestedTarget});
    if(!hw?.connected||busy)return;busy=true;
    hw.step().catch(e=>msg('USB 故障：'+e.message)).finally(()=>{busy=false;update();});
   },

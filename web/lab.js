@@ -91,10 +91,15 @@ function frame(now){
  if(fresh&&lastInput&&(mode!=='camera'||stableFrames>=3))target=kind==='reachy'?reachyMap({...lastInput,center,invert:$('invert').checked,mirror:$('mirror').checked,previous:ctrl.value}):armTarget(lastInput);
  const jitter=Number($('jitter').value),delay=Number($('delay').value)+(Math.random()*2-1)*jitter;
  if(target)ctrl.submit(target,now,{delay,drop:Math.random()<Number($('drop').value),sequence:++seq});
- if(mode==='camera'&&!ctrl.stopped)status((hardware?.connected&&!hardware.armed?'實體未啟用，目前只預覽。':'')+(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint));
- const r=ctrl.tick(now);$('state').textContent=(hardware?.armed?'實體 · ':hardware?.connected?'預覽 · ':'模擬 · ')+r.state;$('state').style.color=r.state==='TRACK'?'#8de4c0':r.state==='STOP'?'#ff9eac':'#f4d29b';$('age').textContent=r.age==null?'—':Math.round(r.age)+' ms';$('values').textContent=JSON.stringify({target,applied:r.value,state:r.state},null,2);
- if(kind==='reachy')viewer.set(r.value);else viewer.setJoints({leader:target??r.value,follower:hardware?.actual??r.value});
- if(now-lastPost>100){lastPost=now;hardware?.tick(r.value,r.state==='TRACK');logs.push({t:Math.round(now),mode,state:r.state,angles:r.value,age:r.age});if(logs.length>6000)logs.shift();
+ if(mode==='camera'&&!ctrl.stopped){
+  const phase=hardware?.armed?hardware.alignment.phase:'off';
+  status(phase==='waiting'?'請保持起始手勢約半秒；確認穩定後才移動實體手臂。':['aligning','settling'].includes(phase)?'正在對齊固定起始姿勢；請保持手勢，等「對齊完成」後再移動。':(hardware?.connected&&!hardware.armed?'實體未啟用，目前只預覽。':'')+(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint));
+ }
+ const r=ctrl.tick(now),align=hardware?.alignment,aligning=hardware?.armed&&['waiting','aligning','settling'].includes(align?.phase);
+ $('state').textContent=aligning?(align.phase==='waiting'?'實體 · 等待手勢':'實體 · 對齊 '+Math.round(align.progress*100)+'%'):(hardware?.armed?'實體 · ':hardware?.connected?'預覽 · ':'模擬 · ')+r.state;
+ $('state').style.color=aligning?'#f4d29b':r.state==='TRACK'?'#8de4c0':r.state==='STOP'?'#ff9eac':'#f4d29b';$('age').textContent=r.age==null?'—':Math.round(r.age)+' ms';$('values').textContent=JSON.stringify({target,applied:r.value,state:r.state},null,2);
+ if(kind==='reachy')viewer.set(r.value);else viewer.setJoints({leader:aligning&&hardware.alignmentGoal?hardware.alignmentGoal:target??r.value,follower:hardware?.actual??r.value});
+ if(now-lastPost>100){lastPost=now;hardware?.tick(r.value,r.state==='TRACK',target);logs.push({t:Math.round(now),mode,state:r.state,angles:r.value,age:r.age});if(logs.length>6000)logs.shift();
   if(kind==='reachy'&&sim&&!busy){busy=true;fetch('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({angles:r.value,active:r.state==='TRACK'})}).then(r=>{if(!r.ok)throw new Error('模擬器命令失敗');$('mujoco').src='/api/frame.jpg?t='+Math.round(now);}).catch(e=>status(e.message)).finally(()=>busy=false);}
  }
  requestAnimationFrame(frame);
@@ -107,6 +112,6 @@ for(const [name,angle]of Object.entries(kind==='reachy'?{yaw:25,left:70,right:70
 $('sliders').after(diagnostics);
 if(kind==='arm'){
  const {mountHardware}=await import('./hardware-ui.js');
- hardware=mountHardware({stopSimulation:stop,setPose(pose){input.seedPose(pose);}});
+ hardware=mountHardware({stopSimulation:stop,setPose(pose){input.seedPose(pose);},shouldAlign:()=>mode==='camera'&&!$('gripperOnly').checked});
 }
 requestAnimationFrame(frame);

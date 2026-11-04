@@ -68,3 +68,43 @@ test('gripper-only pinch closes through bounded USB goals without changing the o
  const write=bus.writes.at(-1);assert.equal(write.addr,REG.goal);
  for(const [id,bytes]of write.rows){const raw=bytes[0]+256*bytes[1];if(id===6){assert.ok(raw<2800&&raw>=2777);}else assert.equal(raw,2047);}
 });
+
+test('hardware captures the raw camera goal, aligns from actual pose, then follows live targets',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now});bus.raw.gripper=2300;
+ await hw.connect();await hw.arm(true,{alignOnStart:true});
+ const initial={...hw.actual},cameraGoal={...initial,shoulder_pan:30,gripper:0},filtered={...initial,shoulder_pan:1};
+ const atArm=bus.writes.length;
+ for(now=0;now<400;now+=100){hw.submit(filtered,true,{alignmentTarget:cameraGoal});await hw.step();}
+ assert.equal(bus.writes.length,atArm);assert.equal(hw.alignmentStatus.phase,'waiting');
+ hw.submit(filtered,true,{alignmentTarget:cameraGoal});await hw.step();
+ assert.ok(Math.abs(hw.alignment.goal.shoulder_pan-30)<.1);assert.equal(hw.alignment.start.shoulder_pan,initial.shoulder_pan);
+ const fixedGoal=hw.alignment.goal.shoulder_pan;let previous={...bus.raw};
+ while(hw.needsAlignment&&now<15000){
+  now+=100;const live={...initial,shoulder_pan:70,gripper:0};hw.submit(live,true,{alignmentTarget:live});await hw.step();
+  assert.equal(hw.alignment.goal.shoulder_pan,fixedGoal);
+  const write=bus.writes.at(-1);for(const [id,bytes]of write.rows){const name=JOINTS[id-1],raw=bytes[0]+bytes[1]*256;assert.ok(Math.abs(raw-previous[name])<=23);bus.raw[name]=raw;}
+  assert.equal(bus.raw.gripper,2300);previous={...bus.raw};
+ }
+ assert.equal(hw.armed,true);assert.equal(hw.alignmentStatus.phase,'following');assert.ok(Math.abs(hw.actual.shoulder_pan-30)<2);
+ const aligned=bus.raw.shoulder_pan;now+=100;hw.submit({...initial,shoulder_pan:70},true);await hw.step();
+ const pan=bus.writes.at(-1).rows[0][1];assert.ok(pan[0]+256*pan[1]>aligned);
+});
+
+test('stop and missing camera input cancel an in-progress alignment without automatic restart',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now});await hw.connect();await hw.arm(true,{alignOnStart:true});
+ const target={...hw.actual,shoulder_pan:45};
+ for(now=0;now<=500;now+=100){hw.submit(target,true);await hw.step();}
+ assert.equal(hw.alignmentStatus.phase,'aligning');now=1000;await hw.step();
+ assert.equal(hw.armed,false);assert.equal(hw.needsAlignment,false);assert.equal(hw.alignment,null);
+ hw.submit(target,true);await hw.step();assert.equal(hw.armed,false);
+ await hw.arm(true,{alignOnStart:true});hw.submit(target,true);await hw.stop();
+ assert.equal(hw.alignmentStatus.phase,'off');assert.equal(hw.target,null);
+});
+
+test('a motor that does not reach the alignment goal stays connected but stops instead of entering live follow',async()=>{
+ let now=0;const states=[],bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now,onState:state=>states.push(state)});
+ await hw.connect();await hw.arm(true,{alignOnStart:true});const target={...hw.actual,shoulder_pan:20};
+ for(now=0;now<12000&&hw.armed;now+=100){hw.submit(target,true);await hw.step();}
+ assert.equal(hw.armed,false);assert.equal(hw.connected,true);assert.match(states.at(-1),/起始姿勢未能到位/);
+ assert.deepEqual(bus.writes.at(-1).rows[0][1].slice(0,2),word(bus.raw.shoulder_pan));
+});
