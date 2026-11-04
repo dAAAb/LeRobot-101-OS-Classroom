@@ -1,5 +1,6 @@
 // All angles in URDF degrees until an adapter. Pure mapping, no I/O.
 // MediaPipe uses unmirrored input. CSS mirroring is presentation only.
+import {measureGrasp} from './gripper-gesture.js';
 export const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
 const rad=180/Math.PI;
 export const REACHY_LIMITS={yaw:[-35,35],left:[0,70],right:[0,70]};
@@ -53,7 +54,7 @@ export function armMap(pose,hand,{world=null,handWorld=null,previous={},baseline
    out.wrist_flex=signedAngle(fore,palm,rightward.map(v=>-v));
    const side=projected(across,axis);if(norm(side)>.015)out.wrist_roll=Math.atan2(dot(side,upright),dot(side,rightward))*rad;
   }
-  out.gripper=clamp((norm(sub(handWorld[4],handWorld[8]))/Math.max(.015,norm(across))-.15)/1.1*80,0,80);
+  const grasp=measureGrasp(hand,handWorld);if(grasp)out.gripper=grasp.openness*80;
  }
  // Optional operator pose alignment does not touch any robot motor calibration.
  if(baseline&&anchor)for(const n of Object.keys(out))if(n!=='gripper'&&Number.isFinite(baseline[n]))out[n]=out[n]-baseline[n]+anchor[n];
@@ -62,13 +63,15 @@ export function armMap(pose,hand,{world=null,handWorld=null,previous={},baseline
 export function synthetic(t){
  const pose=Array.from({length:33},()=>({x:.5,y:.5,z:0,visibility:1}));
  for(const [i,x,y]of [[11,.62,.38],[12,.38,.38],[13,.70,.55],[14,.27,.50],[15,.74,.72],[16,.18,.50-.32*Math.sin(t)],[23,.58,.75],[24,.42,.75]])pose[i]={x,y,z:0,visibility:1};
- const hand=Array.from({length:21},(_,i)=>({x:pose[16].x+(i%4)*.015,y:pose[16].y-Math.floor(i/4)*.02,z:0}));
- hand[0]={...pose[16]};hand[5]={x:.16,y:pose[16].y-.05,z:0};hand[9]={x:.18,y:pose[16].y-.08,z:0};hand[17]={x:.22,y:pose[16].y-.05,z:0};hand[4]={x:.15,y:pose[16].y-.06,z:0};hand[8]={x:.15+.06*(1+Math.sin(t*1.3)),y:pose[16].y-.06,z:0};
+ const handWorld=Array.from({length:21},()=>({x:0,y:0,z:0}));
+ for(const [base,x,y]of[[5,-.025,-.045],[9,-.008,-.05],[13,.009,-.045],[17,.025,-.04]])for(let i=0;i<4;i++)handWorld[base+i]={x,y:y-i*.02,z:0};
+ for(let i=1;i<=4;i++)handWorld[i]={x:-.013*i,y:-.013*i,z:0};
+ handWorld[4]={...handWorld[8],x:handWorld[8].x-.05*(.05+1.15*(1+Math.sin(t*1.3))/2)};
+ const hand=handWorld.map(p=>({x:pose[16].x+p.x,y:pose[16].y+p.y,z:p.z}));
  const world=pose.map(p=>({...p,x:(p.x-.5)*1.2,y:(p.y-.5)*1.2,z:p.z}));
  // A fixed torso and a right arm that bends in a sagittal plane.
  world[14]={x:world[12].x,y:world[12].y+.25,z:0,visibility:1};
  world[16]={x:world[14].x,y:world[14].y+.25*Math.cos(t),z:-.25*Math.sin(t),visibility:1};
- const handWorld=hand.map(p=>({...p,x:(p.x-hand[0].x)*1.2,y:(p.y-hand[0].y)*1.2}));
  return {pose,hand,world,handWorld,yaw:28*Math.sin(t*.6)};
 }
 export class Controller{

@@ -2,6 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {packet,PacketDecoder,SerialBus,HardwareFollower,JOINTS,REG,word,rawToJoint,jointToRaw,calibrationIssues,mergeCalibration} from '../web/feetech-serial.js';
 import {Controller,ARM_LIMITS} from '../web/control-core.js';
 import {InputSession} from '../web/input-session.js';
+import {applyGripperTarget} from '../web/gripper-gesture.js';
 const records=()=>Object.fromEntries(JOINTS.map((n,i)=>[n,{id:i+1,model:777,mode:0,homing_offset:i-2,drive_mode:0,range_min:n==='wrist_roll'?0:800,range_max:n==='wrist_roll'?4095:3300}]));
 class MockBus{
  constructor(){this.cal=records();this.raw=Object.fromEntries(JOINTS.map(n=>[n,2047]));this.writes=[];this.torque=0;}
@@ -57,4 +58,13 @@ test('invalid manual or measured inputs cannot mutate a valid target',()=>{
  const ctrl=new Controller(ARM_LIMITS),input=new InputSession(ctrl);const before={...input.manual};
  assert.throws(()=>input.setManualJoint('elbow_flex',NaN));assert.throws(()=>input.setManualJoint('unknown',1));assert.throws(()=>input.seedPose({elbow_flex:2}));
  assert.deepEqual(input.manual,before);assert.deepEqual(ctrl.value,before);
+});
+
+test('gripper-only pinch closes through bounded USB goals without changing the other five joints',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now});
+ bus.raw.gripper=2800;await hw.connect();await hw.arm(true);
+ const target=applyGripperTarget(null,{ready:true,angle:0},hw.actual,{onlyGripper:true});
+ hw.submit(target,true);now=100;await hw.step();
+ const write=bus.writes.at(-1);assert.equal(write.addr,REG.goal);
+ for(const [id,bytes]of write.rows){const raw=bytes[0]+256*bytes[1];if(id===6){assert.ok(raw<2800&&raw>=2777);}else assert.equal(raw,2047);}
 });

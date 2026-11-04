@@ -1,11 +1,13 @@
 import {Controller,REACHY_LIMITS,ARM_LIMITS,reachyMap,armMap,faceYaw,synthetic} from './control-core.js';
 import {createVision} from './vision.js';
 import {InputSession} from './input-session.js';
+import {GripperGesture,measureGrasp,applyGripperTarget} from './gripper-gesture.js';
 const $=id=>document.getElementById(id),kind=document.body.dataset.kind,limits=kind==='reachy'?REACHY_LIMITS:ARM_LIMITS;
 const ctrl=new Controller(limits);let mode='manual',vision=null,stream=null,busy=false,loading=false,lastFrame=-1,lastDetect=0,lastInput=null,center=0,seq=0,logs=[],sim=false,lastPost=0;
 let hardware=null,armBaseline=null,armAnchor=null,stableFrames=0,trackingHint='';
+const gripper=new GripperGesture();let gripReading=null;
 const input=new InputSession(ctrl,{hardware:()=>hardware,
- onMode(m){mode=m;stableFrames=0;if(m!=='camera')$('latency').textContent='—';$('mode').value=m;lastInput=null;status('已切換模式；USB 若已連線，請重新啟用實體控制，再按「接手／繼續」。');},
+ onMode(m){mode=m;stableFrames=0;gripper.reset();gripReading=null;if(m!=='camera')$('latency').textContent='—';$('mode').value=m;lastInput=null;status(hardware?.connected?'已切換模式；請重新啟用實體控制，再按「接手／繼續」。':'已切換模式；按「接手／繼續」開始。');},
  onManual(pose){for(const k in pose){$('j-'+k).value=pose[k];$('o-'+k).textContent=Math.round(pose[k])+'°';}}
 });
 const manual=input.manual;
@@ -20,10 +22,26 @@ if(kind==='reachy'){
 }
 else{viewer=(await import('./viewer3d.js')).createViewer($('view'));viewer.setColors({leader:'#ffb37a',follower:'#71d8ff'});await viewer.ready;$('viewNote').textContent=viewer.usingFallback?'URDF 載入失敗：目前為 2D 備援示意。請檢查模型檔案。':$('viewNote').textContent;$('reachyOptions').hidden=true;$('calibrate').textContent='以目前手勢為基準';$('simToggle').hidden=true;}
 function status(t){$('status').textContent=t;}
+function updateGrip(observation,now){
+ if(kind!=='arm')return;
+ gripReading=gripper.update(measureGrasp(observation?.hand,observation?.handWorld),now,ctrl.value.gripper);
+ const percent=Math.round(gripReading.angle/80*100);
+ $('gripperMeter').value=percent;$('gripperMeter').textContent=percent+'%';$('gripperPercent').textContent=gripReading.ready?percent+'%':'—';
+ const gesture={pinch:'兩指捏合',fist:'四指握拳',open:'手掌張開'}[gripReading.gesture]??'右手';
+ $('gripperStatus').textContent=gripReading.state==='missing'?'右手看不清楚：保持夾爪位置，請將整隻右手移回畫面。':gripReading.state==='acquiring'?'已看到右手，正在確認穩定手勢…':gesture+' · '+(gripper.mode==='analog'?'目標張開 '+percent+'%':gripReading.state==='closed'?'ON · 夾住':gripReading.state==='open'?'OFF · 張開':'中間手勢 · 保持');
+}
+function armTarget(observation){
+ const body=armMap(observation.pose,observation.hand,{...observation,previous:ctrl.value,baseline:armBaseline,anchor:armAnchor});
+ return applyGripperTarget(body,gripReading,ctrl.value,{onlyGripper:$('gripperOnly').checked});
+}
+if(kind==='arm'){
+ const changeGripper=()=>{stop('已變更夾爪設定，請重新啟用實體控制');gripper.setMode($('gripperMode').value);gripReading=null;stableFrames=0;status('夾爪設定已更新；'+(hardware?.connected?'請重新啟用實體控制，再':'')+'按「接手／繼續」。');};
+ $('gripperMode').onchange=changeGripper;$('gripperOnly').onchange=changeGripper;
+}else if($('gripperOptions'))$('gripperOptions').hidden=true;
 function setMode(m){input.selectMode(m);}
 $('mode').onchange=e=>setMode(e.target.value);
 $('resume').onclick=()=>{input.resume();status(hardware?.connected&&!hardware.armed?'USB 已連線但實體尚未啟用；目前只預覽。請到第 04 區啟用實體控制。':mode==='camera'?'追蹤控制中；請保持上半身與手腕在畫面內。':hardware?.armed?'實體滑桿控制中。':'模擬控制中。');};
-function stop(reason){input.stop(typeof reason==='string'?reason:undefined);status('已停止。待送命令已清空；手動接手才會繼續。');}
+function stop(reason){input.stop(typeof reason==='string'?reason:undefined);gripper.reset();gripReading=null;status('已停止。待送命令已清空；手動接手才會繼續。');}
 $('stop').onclick=stop;
 document.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)){e.preventDefault();stop();}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stop('分頁已切到背景，請回到此頁重新啟用實體控制');});
@@ -43,21 +61,34 @@ $('cameraStart').onclick=async()=>{
 $('cameraStop').onclick=()=>{stop();stream?.getTracks().forEach(t=>t.stop());stream=null;$('camera').srcObject=null;lastInput=null;status('鏡頭已關閉。');};
 $('export').onclick=()=>{const blob=new Blob([JSON.stringify({kind,units:'degrees',syntheticOrCamera:mode,records:logs},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='teleop-angles.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
 $('simToggle').onclick=async()=>{try{const s=await(await fetch('/api/status')).json();if(!s.mujoco)throw new Error('請以 python server.py --mujoco 啟動');sim=!sim;$('mujoco').style.display=sim?'block':'none';$('viewNote').textContent=sim?'官方 Reachy Mini XML + MuJoCo + 解析式 IK。僅本機模擬，無實體連線。':'教學示意模型（非動力學）';}catch(e){status(e.message);}};
-function overlay(input){const c=$('overlay');c.width=640;c.height=480;const ctx=c.getContext('2d');ctx.clearRect(0,0,640,480);if(!input?.pose)return;const p=input.pose;ctx.lineWidth=4;ctx.strokeStyle='#7bd6fa';for(const[a,b]of[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24]]){if(!p[a]||!p[b])continue;ctx.beginPath();ctx.moveTo((1-p[a].x)*640,p[a].y*480);ctx.lineTo((1-p[b].x)*640,p[b].y*480);ctx.stroke();}for(const i of[15,16]){ctx.fillStyle=i===16?'#ffbd81':'#8de4c0';ctx.beginPath();ctx.arc((1-p[i].x)*640,p[i].y*480,9,0,7);ctx.fill();ctx.font='18px sans-serif';ctx.fillText(i===16?'你的右手 R':'你的左手 L',(1-p[i].x)*640+12,p[i].y*480);}}
+function overlay(input){
+ const c=$('overlay');c.width=640;c.height=480;const ctx=c.getContext('2d');ctx.clearRect(0,0,640,480);
+ const line=(points,a,b)=>{if(!points?.[a]||!points?.[b])return;ctx.beginPath();ctx.moveTo((1-points[a].x)*640,points[a].y*480);ctx.lineTo((1-points[b].x)*640,points[b].y*480);ctx.stroke();};
+ const p=input?.pose;ctx.lineWidth=4;ctx.strokeStyle='#7bd6fa';
+ if(p){for(const[a,b]of[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24]])line(p,a,b);
+  for(const i of[15,16]){if(!p[i])continue;ctx.fillStyle=i===16?'#ffbd81':'#8de4c0';ctx.beginPath();ctx.arc((1-p[i].x)*640,p[i].y*480,9,0,7);ctx.fill();ctx.font='18px sans-serif';ctx.fillText(i===16?'你的右手 R':'你的左手 L',(1-p[i].x)*640+12,p[i].y*480);}}
+ const hand=input?.hand;if(!hand)return;
+ ctx.lineWidth=2;ctx.strokeStyle='#a6f0cd';
+ for(const chain of[[0,1,2,3,4],[0,5,6,7,8],[5,9,10,11,12],[9,13,14,15,16],[13,17,18,19,20],[17,0]])for(let i=1;i<chain.length;i++)line(hand,chain[i-1],chain[i]);
+ ctx.strokeStyle='#ffbd81';ctx.lineWidth=4;line(hand,4,8);
+ for(const point of hand){ctx.fillStyle='#a6f0cd';ctx.beginPath();ctx.arc((1-point.x)*640,point.y*480,3,0,7);ctx.fill();}
+}
 function frame(now){
  let target=null;
  if(mode==='manual')target={...manual};
- else if(mode==='replay'){lastInput=synthetic(now/1000);overlay(lastInput);}
+ else if(mode==='replay'){lastInput=synthetic(now/1000);updateGrip(lastInput,now);overlay(lastInput);}
  else if(mode==='camera'&&vision&&stream&&$('camera').readyState>=2&&$('camera').currentTime!==lastFrame&&now-lastDetect>65){
   lastFrame=$('camera').currentTime;lastDetect=now;const t=performance.now();try{const r=vision.detect($('camera'),now);lastInput={...r,yaw:faceYaw(r.matrix)};
- const observed=kind==='arm'?armMap(lastInput.pose,lastInput.hand,{...lastInput,previous:ctrl.value}):reachyMap({...lastInput,previous:ctrl.value});
+ updateGrip(lastInput,now);
+ const observed=kind==='arm'?armTarget(lastInput):reachyMap({...lastInput,previous:ctrl.value});
  stableFrames=observed?Math.min(3,stableFrames+1):0;
  trackingHint=!observed?(kind==='arm'?'右手臂離開畫面或辨識不足：保持姿勢。請讓雙肩、髖部、右手肘與手腕回到框內。':'看不到頭與手：保持姿勢，請回到鏡頭前。'):stableFrames<3?'已重新看到你，正在確認連續三幀…':kind==='arm'&&!lastInput.hand?'手掌暫時看不到：肩肘繼續，手腕與夾爪保持。':'追蹤穩定。離開畫面會保持姿勢；回到框內後模擬器平順接續。';
- overlay(lastInput);$('latency').textContent=Math.round(performance.now()-t)+' ms';}catch(e){lastInput=null;status('辨識失敗：'+e.message);}
+ if(kind==='arm'&&$('gripperOnly').checked)trackingHint=gripReading?.ready?'只控制夾爪：手臂維持原位；捏合或握拳夾住，張開手放開。':'右手辨識不足：保持姿勢，請將整隻右手放入畫面。';
+ overlay(lastInput);$('latency').textContent=Math.round(performance.now()-t)+' ms';}catch(e){lastInput=null;updateGrip(null,now);status('辨識失敗：'+e.message);}
  }
  // Do not refresh camera commands from stale cached landmarks.
  const fresh=mode==='replay'||mode==='camera'&&now-lastDetect<100;
- if(fresh&&lastInput&&(mode!=='camera'||stableFrames>=3))target=kind==='reachy'?reachyMap({...lastInput,center,invert:$('invert').checked,mirror:$('mirror').checked,previous:ctrl.value}):armMap(lastInput.pose,lastInput.hand,{...lastInput,previous:ctrl.value,baseline:armBaseline,anchor:armAnchor});
+ if(fresh&&lastInput&&(mode!=='camera'||stableFrames>=3))target=kind==='reachy'?reachyMap({...lastInput,center,invert:$('invert').checked,mirror:$('mirror').checked,previous:ctrl.value}):armTarget(lastInput);
  const jitter=Number($('jitter').value),delay=Number($('delay').value)+(Math.random()*2-1)*jitter;
  if(target)ctrl.submit(target,now,{delay,drop:Math.random()<Number($('drop').value),sequence:++seq});
  if(mode==='camera'&&!ctrl.stopped)status((hardware?.connected&&!hardware.armed?'實體未啟用，目前只預覽。':'')+(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint));
