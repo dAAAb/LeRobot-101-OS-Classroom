@@ -1,11 +1,16 @@
 import {Controller,REACHY_LIMITS,ARM_LIMITS,reachyMap,armMap,faceYaw,synthetic} from './control-core.js';
 import {createVision} from './vision.js';
+import {InputSession} from './input-session.js';
 const $=id=>document.getElementById(id),kind=document.body.dataset.kind,limits=kind==='reachy'?REACHY_LIMITS:ARM_LIMITS;
 const ctrl=new Controller(limits);let mode='manual',vision=null,stream=null,busy=false,loading=false,lastFrame=-1,lastDetect=0,lastInput=null,center=0,seq=0,logs=[],sim=false,lastPost=0;
 let hardware=null,armBaseline=null,armAnchor=null,stableFrames=0,trackingHint='';
-const manual=Object.fromEntries(Object.keys(limits).map(k=>[k,0]));
+const input=new InputSession(ctrl,{hardware:()=>hardware,
+ onMode(m){mode=m;stableFrames=0;if(m!=='camera')$('latency').textContent='—';$('mode').value=m;lastInput=null;status('已切換模式；USB 若已連線，請重新啟用實體控制，再按「接手／繼續」。');},
+ onManual(pose){for(const k in pose){$('j-'+k).value=pose[k];$('o-'+k).textContent=Math.round(pose[k])+'°';}}
+});
+const manual=input.manual;
 const names={yaw:'頭部轉向',left:'機器人左天線',right:'機器人右天線',shoulder_pan:'肩部左右',shoulder_lift:'肩部抬起',elbow_flex:'手肘彎曲',wrist_flex:'手腕彎曲',wrist_roll:'手腕旋轉',gripper:'夾爪開合'};
-for(const [k,[min,max]]of Object.entries(limits)){const l=document.createElement('label');l.innerHTML=`<span>${names[k]}</span><output id="o-${k}">0°</output><input id="j-${k}" type="range" min="${min}" max="${max}" step="1" value="0">`;$('sliders').append(l);l.querySelector('input').oninput=e=>{manual[k]=Number(e.target.value);$('o-'+k).textContent=manual[k]+'°';setMode('manual');};}
+for(const [k,[min,max]]of Object.entries(limits)){const l=document.createElement('label');l.innerHTML=`<span>${names[k]}</span><output id="o-${k}">0°</output><input id="j-${k}" type="range" min="${min}" max="${max}" step="1" value="0">`;$('sliders').append(l);l.querySelector('input').oninput=e=>input.setManualJoint(k,Number(e.target.value));}
 let viewer;
 if(kind==='reachy'){
  viewer={set(){}};sim=true;$('mujoco').style.display='block';$('simToggle').hidden=true;
@@ -15,13 +20,13 @@ if(kind==='reachy'){
 }
 else{viewer=(await import('./viewer3d.js')).createViewer($('view'));viewer.setColors({leader:'#ffb37a',follower:'#71d8ff'});await viewer.ready;$('viewNote').textContent=viewer.usingFallback?'URDF 載入失敗：目前為 2D 備援示意。請檢查模型檔案。':$('viewNote').textContent;$('reachyOptions').hidden=true;$('calibrate').textContent='以目前手勢為基準';$('simToggle').hidden=true;}
 function status(t){$('status').textContent=t;}
-function setMode(m){hardware?.stop();mode=m;stableFrames=0;if(m!=='camera')$('latency').textContent='—';$('mode').value=m;ctrl.stop();lastInput=null;status('已切換模式；按「接手／繼續」開始。');}
+function setMode(m){input.selectMode(m);}
 $('mode').onchange=e=>setMode(e.target.value);
-$('resume').onclick=()=>{ctrl.resume();status(mode==='camera'?'追蹤控制中；請保持上半身與手腕在畫面內。':'模擬控制中。');};
-function stop(){hardware?.stop();ctrl.stop();status('已停止。待送命令已清空；手動接手才會繼續。');}
+$('resume').onclick=()=>{input.resume();status(hardware?.connected&&!hardware.armed?'USB 已連線但實體尚未啟用；目前只預覽。請到第 04 區啟用實體控制。':mode==='camera'?'追蹤控制中；請保持上半身與手腕在畫面內。':hardware?.armed?'實體滑桿控制中。':'模擬控制中。');};
+function stop(reason){input.stop(typeof reason==='string'?reason:undefined);status('已停止。待送命令已清空；手動接手才會繼續。');}
 $('stop').onclick=stop;
 document.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)){e.preventDefault();stop();}});
-document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stop('分頁已切到背景，請回到此頁重新啟用實體控制');});
 $('replay').onclick=()=>{setMode('replay');ctrl.resume();status(kind==='reachy'?'合成座標重播：右手週期抬高，頭左右轉動。非真人攝影機測試。':'合成座標重播：右手揮動、手掌捏合。非真人攝影機測試。');};
 $('neutral').onclick=()=>{Object.keys(manual).forEach(k=>{manual[k]=0;$('j-'+k).value=0;$('o-'+k).textContent='0°';});setMode('manual');ctrl.resume();};
 $('calibrate').onclick=()=>{
@@ -55,8 +60,8 @@ function frame(now){
  if(fresh&&lastInput&&(mode!=='camera'||stableFrames>=3))target=kind==='reachy'?reachyMap({...lastInput,center,invert:$('invert').checked,mirror:$('mirror').checked,previous:ctrl.value}):armMap(lastInput.pose,lastInput.hand,{...lastInput,previous:ctrl.value,baseline:armBaseline,anchor:armAnchor});
  const jitter=Number($('jitter').value),delay=Number($('delay').value)+(Math.random()*2-1)*jitter;
  if(target)ctrl.submit(target,now,{delay,drop:Math.random()<Number($('drop').value),sequence:++seq});
- if(mode==='camera'&&!ctrl.stopped)status(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint);
- const r=ctrl.tick(now);$('state').textContent=r.state;$('state').style.color=r.state==='TRACK'?'#8de4c0':r.state==='STOP'?'#ff9eac':'#f4d29b';$('age').textContent=r.age==null?'—':Math.round(r.age)+' ms';$('values').textContent=JSON.stringify({target,applied:r.value,state:r.state},null,2);
+ if(mode==='camera'&&!ctrl.stopped)status((hardware?.connected&&!hardware.armed?'實體未啟用，目前只預覽。':'')+(now-lastDetect>350?'攝影機影格中斷：保持姿勢。請檢查鏡頭連線。':trackingHint));
+ const r=ctrl.tick(now);$('state').textContent=(hardware?.armed?'實體 · ':hardware?.connected?'預覽 · ':'模擬 · ')+r.state;$('state').style.color=r.state==='TRACK'?'#8de4c0':r.state==='STOP'?'#ff9eac':'#f4d29b';$('age').textContent=r.age==null?'—':Math.round(r.age)+' ms';$('values').textContent=JSON.stringify({target,applied:r.value,state:r.state},null,2);
  if(kind==='reachy')viewer.set(r.value);else viewer.setJoints({leader:target??r.value,follower:hardware?.actual??r.value});
  if(now-lastPost>100){lastPost=now;hardware?.tick(r.value,r.state==='TRACK');logs.push({t:Math.round(now),mode,state:r.state,angles:r.value,age:r.age});if(logs.length>6000)logs.shift();
   if(kind==='reachy'&&sim&&!busy){busy=true;fetch('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({angles:r.value,active:r.state==='TRACK'})}).then(r=>{if(!r.ok)throw new Error('模擬器命令失敗');$('mujoco').src='/api/frame.jpg?t='+Math.round(now);}).catch(e=>status(e.message)).finally(()=>busy=false);}
@@ -71,6 +76,6 @@ for(const [name,angle]of Object.entries(kind==='reachy'?{yaw:25,left:70,right:70
 $('sliders').after(diagnostics);
 if(kind==='arm'){
  const {mountHardware}=await import('./hardware-ui.js');
- hardware=mountHardware({stopSimulation:stop,setPose(pose){Object.assign(manual,pose);Object.assign(ctrl.value,pose);for(const k in manual){$('j-'+k).value=manual[k];$('o-'+k).textContent=Math.round(manual[k])+'°';}mode='manual';$('mode').value=mode;}});
+ hardware=mountHardware({stopSimulation:stop,setPose(pose){input.seedPose(pose);}});
 }
 requestAnimationFrame(frame);

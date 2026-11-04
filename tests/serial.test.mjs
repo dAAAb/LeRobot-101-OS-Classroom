@@ -1,5 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {packet,PacketDecoder,SerialBus,HardwareFollower,JOINTS,REG,word,rawToJoint,jointToRaw,calibrationIssues,mergeCalibration} from '../web/feetech-serial.js';
+import {Controller,ARM_LIMITS} from '../web/control-core.js';
+import {InputSession} from '../web/input-session.js';
 const records=()=>Object.fromEntries(JOINTS.map((n,i)=>[n,{id:i+1,model:777,mode:0,homing_offset:i-2,drive_mode:0,range_min:n==='wrist_roll'?0:800,range_max:n==='wrist_roll'?4095:3300}]));
 class MockBus{
  constructor(){this.cal=records();this.raw=Object.fromEntries(JOINTS.map(n=>[n,2047]));this.writes=[];this.torque=0;}
@@ -18,3 +20,41 @@ test('arming requires confirmation, seeds actual positions, then enables torque'
 test('target is limited relative to measured pose; stale command latches HOLD',async()=>{let now=0;const b=new MockBus(),h=new HardwareFollower(b,{clock:()=>now});await h.connect();await h.arm(true);h.submit(Object.fromEntries(JOINTS.map(n=>[n,70])),true);now=100;await h.step();const row=b.writes.at(-1).rows[0][1];assert.ok(row[0]+row[1]*256-2047<=23);now=500;await h.step();assert.equal(h.armed,false);assert.deepEqual(b.writes.at(-1).rows[0][1].slice(0,2),word(2047));});
 test('stop during an outstanding read prevents subsequent motion target',async()=>{const b=new MockBus(),h=new HardwareFollower(b);await h.connect();await h.arm(true);h.submit(Object.fromEntries(JOINTS.map(n=>[n,70])),true);let release;const original=b.read.bind(b);let once=true;b.read=async(...args)=>{if(once&&args[1]===56){once=false;await new Promise(r=>release=r);}return original(...args);};const step=h.step();await new Promise(r=>setImmediate(r));const stopped=h.stop();release();await step;await stopped;assert.equal(h.armed,false);assert.deepEqual(b.writes.at(-1).rows[0][1].slice(0,2),word(2047));});
 test('SerialBus rejects EEPROM writes and poisons timed-out connection',async()=>{const port={async open(){},async close(){},writable:new WritableStream({write(){}}),readable:new ReadableStream({start(){},cancel(){}})};const b=new SerialBus(port,{timeout:10});await b.open();await assert.rejects(b.syncWrite(31,2,[[1,[0,0]]]),/禁止/);await assert.rejects(b.read(1,56,2),/逾時/);await assert.rejects(b.read(2,56,2),/逾時/);await b.close();});
+
+test('camera input survives USB connect and arm; measured-pose seeding never starts tracking',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now}),ctrl=new Controller(ARM_LIMITS),input=new InputSession(ctrl,{hardware:()=>hw});
+ input.selectMode('camera');await hw.connect();input.seedPose(hw.actual);
+ assert.equal(input.mode,'camera');assert.equal(bus.writes.length,0);
+ input.stop();await hw.arm(true);input.seedPose(hw.actual);
+ assert.equal(input.mode,'camera');assert.equal(hw.armed,true);assert.equal(ctrl.stopped,true);
+ const writes=bus.writes.length;now=100;await hw.step();assert.equal(bus.writes.length,writes);
+ input.resume();ctrl.submit({...hw.actual,elbow_flex:20},now);ctrl.tick(now);now=200;
+ const result=ctrl.tick(now);hw.submit(result.value,result.state==='TRACK');await hw.step();
+ assert.equal(hw.armed,true);assert.equal(bus.writes.at(-1).addr,REG.goal);
+ const elbow=bus.writes.at(-1).rows[2][1];assert.ok(elbow[0]+256*elbow[1]>2047);
+});
+
+test('moving a slider in manual mode keeps hardware enabled and sends the new goal',async()=>{
+ let now=0;const bus=new MockBus(),hw=new HardwareFollower(bus,{clock:()=>now}),ctrl=new Controller(ARM_LIMITS),input=new InputSession(ctrl,{hardware:()=>hw});
+ await hw.connect();await hw.arm(true);input.seedPose(hw.actual);input.resume();ctrl.tick(0);
+ input.setManualJoint('elbow_flex',20);input.setManualJoint('elbow_flex',25);
+ assert.equal(hw.armed,true);assert.equal(ctrl.stopped,false);
+ ctrl.submit(input.manual,1);now=100;const result=ctrl.tick(now);hw.submit(result.value,true);await hw.step();
+ const elbow=bus.writes.at(-1).rows[2][1];assert.ok(elbow[0]+256*elbow[1]>2047);
+ assert.equal(bus.writes.filter(w=>w.addr===REG.torque).length,1);
+});
+
+test('changing input or leaving the page still latches hardware HOLD; resume alone cannot rearm',async()=>{
+ const bus=new MockBus(),hw=new HardwareFollower(bus),ctrl=new Controller(ARM_LIMITS),input=new InputSession(ctrl,{hardware:()=>hw});
+ await hw.connect();await hw.arm(true);input.seedPose(hw.actual);input.resume();
+ input.selectMode('camera');await hw.queue;assert.equal(hw.armed,false);assert.equal(ctrl.stopped,true);
+ input.resume();assert.equal(hw.armed,false);
+ await hw.arm(true);input.seedPose(hw.actual);await input.stop('分頁已切到背景');
+ input.resume();assert.equal(hw.armed,false);assert.equal(hw.target,null);
+});
+
+test('invalid manual or measured inputs cannot mutate a valid target',()=>{
+ const ctrl=new Controller(ARM_LIMITS),input=new InputSession(ctrl);const before={...input.manual};
+ assert.throws(()=>input.setManualJoint('elbow_flex',NaN));assert.throws(()=>input.setManualJoint('unknown',1));assert.throws(()=>input.seedPose({elbow_flex:2}));
+ assert.deepEqual(input.manual,before);assert.deepEqual(ctrl.value,before);
+});

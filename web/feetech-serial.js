@@ -151,8 +151,8 @@ export class HardwareFollower{
   const next=Object.fromEntries(JOINTS.map(n=>[n,Math.round(this.raw[n]+clamp(jointToRaw(this.target[n],this.calibration[n])-this.raw[n],-ticks,ticks))]));
   if(this.armed&&epoch===this.epoch)await this.bus.syncWrite(REG.goal,6,this.positionRows(next));
  }).catch(e=>{this.armed=false;this.epoch++;this.connected=false;this.onState('FAULT: '+e.message);throw e;});}
- stop(){
-  this.armed=false;this.target=null;this.epoch++;this.onState('HOLD — 已停止追蹤');
+ stop(reason='已停止追蹤'){
+  this.armed=false;this.target=null;this.epoch++;this.onState('HOLD — '+reason);
   return this.exclusive(async()=>{if(!this.connected||!this.hasControl)return;await this.readPositions();await this.bus.syncWrite(REG.goal,6,this.positionRows(this.raw));}).catch(e=>{this.connected=false;this.onState('FAULT: '+e.message);});
  }
  async disconnect(){await this.stop();this.connected=false;await this.bus.close();this.onState('DISCONNECTED');}
